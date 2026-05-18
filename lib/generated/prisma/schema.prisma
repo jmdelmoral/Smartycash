@@ -1,0 +1,35 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+// Looking for ways to speed up your queries, or scale easily with your serverless or edge functions?
+// Try Prisma Accelerate: https://pris.ly/cli/accelerate-init
+
+generator client {
+  provider = "prisma-client-js"
+  output   = "../lib/generated/prisma"
+}
+
+datasource db {
+  provider = "mysql"
+  url      = env("DATABASE_URL")
+}
+
+// Define tus modelos aquí. Por ejemplo, un modelo de Usuario:
+model User {
+  id                 String   @id @default(cuid()) // ID único para el usuario
+  email              String   @unique // Correo electrónico único
+  name               String? // Nombre opcional
+  role               UserRole @default(AgenteCC) // Rol del usuario, por defecto 'AgenteCC' (o el que consideres más adecuado)
+  mustChangePassword Boolean  @default(false) // Indica si el usuario debe cambiar su contraseña al iniciar sesión
+}
+
+// Enum para los roles de usuario, reflejando el tipo UserRole de tu aplicación.
+// Se usa @map para mantener los nombres originales con espacios si es necesario.
+enum UserRole {
+  Administrador
+  Contabilidad
+  Recaudacion
+  ConciliacionMediosDePago @map("Conciliación medios de pago") // Mapeo para nombres con espacios
+  AgenteCC                 @map("Agente CC") // Mapeo para nombres con espacios
+  Cobranza
+}

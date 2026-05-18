@@ -1,0 +1,83 @@
+---
+description: Rules for frontend projects with Next.js, React, and TypeScript. Very opinionated by Cristian v1.3.1
+globs: **/*.ts,**/*.tsx,app/**/*,components/**/*,lib/**/*
+alwaysApply: false
+---
+# ⚛Frontend Rules – Next.js + TypeScript
+
+These rules apply to projects using **Next.js 15+, React, TypeScript, and Shadcn UI**.
+
+## Project Structure
+
+- Use the App Router (`app/`).
+- Reusable components in `components/`.
+- Utilities in `lib/`.
+- API routes in `app/api/`.
+- Use **kebab-case** for folders and files.
+- Use **PascalCase** for components and types.
+
+## Code Style
+
+- 4-space tabs.
+- Styling with **Tailwind CSS**.
+- Naming conventions:
+  - `PascalCase` for components and types.
+  - `camelCase` for variables, props, and functions.
+  - `UPPERCASE` for constants and environment variables.
+  - `kebab-case` for folders and files.
+
+## Components
+
+- Small components, focused on a single responsibility.
+- Use composition over inheritance.
+- Break down complex components into sub-components.
+- Type all props with TypeScript.
+- Use loading states (`Skeleton`) and error boundaries (`ErrorBoundary`).
+
+## Shadcn UI
+
+- Use Shadcn components without modifying them directly.
+- If you need to adapt, create a wrapper with your custom styling.
+
+## Next.js
+
+- Use:
+  - `next/image`, `next/link`, `next/head`, `next/script`.
+  - Server Actions for mutations.
+  - Metadata and caching correctly.
+- Avoid unnecessary client-side usage (`"use client"`).
+- Leverage server-side rendering (SSR/SSG).
+
+## State and Data
+
+- Use `fetch` with loading and error handling.
+- Keep state simple and typed.
+- If using a store (like Zustand or Redux), document its usage.
+
+## Tests (optionally activatable)
+
+> If you activate automatic testing rules, Cursor should:
+- Verify if each component has a `.test.tsx` file or is located in `__tests__/`.
+- Suggest basic tests if missing, using Testing Library and Jest.
+- Test component behavior, not its implementation.
+
+## Security
+
+- Sanitize user inputs.
+- Protect private routes if there is authentication.
+- Be mindful of CORS and token usage.
+
+## Internationalization
+
+- Use `next-intl`.
+- Files in `locales/`, consistent keys.
+- Avoid hardcoded strings.
+- Format dates and currencies according to the language.
+
+## Best Practices
+
+- Mobile first.
+- Clean, self-descriptive code.
+- Use design patterns like **Atomic Design**.
+- Split the code (code splitting).
+- Lazy load where useful.

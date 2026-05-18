@@ -1,0 +1,57 @@
+---
+description: General development principles for all projects. Very opinionated by Cristian v1.0.1.
+globs: 
+alwaysApply: true
+---
+# General Development Principles
+
+These rules apply to all projects, regardless of the technology used (Next.js, Ruby on Rails, etc.). They focus on code quality, maintainability, and best practices.
+
+## Philosophy and Principles
+
+- Apply the **DRY** (Don't Repeat Yourself) principle: avoid duplication of logic and structures.
+- Prioritize **readable code over clever code**.
+- Follow the principles of the book **Clean Code**:
+  - Descriptive names for variables, functions, and classes.
+  - Small functions that do one thing.
+  - Do not leave commented-out or unused code.
+  - Separate logic from presentation.
+- Apply ideas from the book **The Pragmatic Programmer**:
+  - Use tools that automate repetitive tasks.
+  - Document important design decisions.
+  - Keep code flexible for future changes.
+  - Write self-explanatory code, reducing the need for comments.
+
+## Testing
+
+- Write tests for critical system logic.
+- Add default tests for each new component or module.
+- Use tests that validate behavior from the user's perspective.
+- Utilize ecosystem tools:
+  - **RSpec** for Rails.
+  - **Testing Library + Jest** for React/Next.js.
+- Verify that each new component file includes an associated test file in `__tests__` or with the suffix `.spec` or `.test`.
+
+## Code Organization
+
+- Maintain a consistent structure across all projects.
+- Use clear and uniform naming conventions.
+- Create reusable modules for shared logic.
+- Document complex functions with brief and useful comments.
+
+## Review and Quality
+
+- Integrate linting and automatic formatting tools:
+  - **ESLint** and **Prettier** in frontend projects.
+  - **RuboCop** in Rails projects.
+- All new functionality must:
+  - Be reviewed by another team member.
+  - Include tests if applicable.
+  - Be briefly explained in the PR or commit.
+
+## Scalability and Maintainability
+
+- Favor simple solutions over unnecessarily complex architectures.
+- Avoid unnecessary dependencies.
+- Think about the experience of the next developer who will maintain your code.
+- Refactor if you find a better way to implement something, without breaking existing functionality.

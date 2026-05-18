@@ -1,0 +1,84 @@
+---
+description: "Comprehensive and extensible guide for any web development, with emphasis on OWASP Top 10, defense-in-depth, and Zero-Trust principles. Very opinionated by Cristian v0.3.0."
+enabled: true
+globs:
+  - "**/*"
+---
+
+<!--
+  RULE: vuln-analysis-owasp
+  Analiza el código para identificar vulnerabilidades según OWASP Top 10 y sugiere refactorings.
+-->
+Analyze the following code for potential security vulnerabilities, focusing on OWASP Top 10 (e.g., Injection, XSS, Broken Auth, Security Misconfiguration). For each issue found, suggest a mitigation with referencia a OWASP Top 10.
+
+<!--
+  RULE: no-hardcoded-credentials
+  Detecta y elimina credenciales y datos sensibles en claro.
+-->
+Scan the code for hardcoded credentials, API keys, tokens, or sensitive information. Recommend moving secrets to secure storage (environment variables, vault) and show example code changes.
+
+<!--
+  RULE: input-validation
+  Asegura validación de entrada rigurosa.
+-->
+Review input handling and identify missing or insufficient validation. Propose robust validation logic for strings, numbers, dates, and file uploads to prevent injection attacks.
+
+<!--
+  RULE: sql-injection
+  Protege contra inyección SQL.
+-->
+Identify SQL queries built via string concatenation or interpolation. Refactor to use parameterized queries or ORM best practices explaining how this prevents SQL injection.
+
+<!--
+  RULE: xss-protection
+  Evita Cross-Site Scripting (XSS).
+-->
+Locate points where user-controlled data is rendered in HTML/JS. Suggest output encoding, sanitization, or CSP headers, and provide updated code examples.
+
+<!--
+  RULE: path-traversal
+  Mitiga Path Traversal.
+-->
+Inspect file system access for potential path traversal. Implement safe path resolution, whitelist allowed paths, and sanitize or reject malicious inputs.
+
+<!--
+  RULE: command-injection
+  Previene Command Injection.
+-->
+Check for any shell/system calls built from user input. Refactor to use safe APIs or properly escape/validate arguments, avoiding direct system invocations.
+
+<!--
+  RULE: ssrf-protection
+  Detecta y mitiga Server-Side Request Forgery (SSRF).
+-->
+Analyze code for server-side HTTP requests constructed from user input. Implement allowlists of target hosts, validate URLs, and use safe HTTP client configurations to prevent SSRF :contentReference[oaicite:2]{index=2}:contentReference[oaicite:3]{index=3}.
+
+<!--
+  RULE: csrf-protection
+  Evita Cross-Site Request Forgery (CSRF).
+-->
+Locate endpoints vulnerable to CSRF. Enforce CSRF tokens on state-changing requests or use same-site cookies/double-submit cookies patterns as per OWASP CSRF Prevention Cheat Sheet :contentReference[oaicite:4]{index=4}:contentReference[oaicite:5]{index=5}.
+
+<!--
+  RULE: cors-misconfiguration
+  Previene vulnerabilidades de CORS.
+-->
+Inspect CORS configurations for overly permissive settings (e.g., Access-Control-Allow-Origin: *). Enforce strict origin whitelists, validate preflight requests, and avoid echoing untrusted origins :contentReference[oaicite:6]{index=6}:contentReference[oaicite:7]{index=7}.
+
+<!--
+  RULE: defense-in-depth
+  Genera funcionalidades con defensa en profundidad.
+-->
+Please create [functionality] that prioritizes security over convenience. Implement layering of controls including input validation, output encoding, authentication checks, rate limiting, logging/auditing, and error handling. After code generation, list remaining potential weaknesses.
+
+<!--
+  RULE: zero-trust-principles
+  Aplica Zero-Trust y least privilege.
+-->
+Generate [functionality] with explicit OWASP Top 10 protections. Include robust input validation, strict access control (least privilege), network segmentation, and explain your security reasoning step-by-step.
+
+<!--
+  RULE: sensitive-info-exposure
+  Evita exposición de información sensible en logs y errores.
+-->
+Analyze code paths and error handlers for unintended data leakage (stack traces, detailed errors). Refactor to sanitize error messages and configure safe logging levels.

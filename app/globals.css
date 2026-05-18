@@ -1,0 +1,52 @@
+@import url('https://fonts.googleapis.com/css2?family=Lato:wght@400;500;600;700&display=swap');
+@import 'tw-animate-css';
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --background: 240 10% 99%; /* Un blanco ligeramente apagado para el fondo general */
+    --foreground: 217 53% 18%; /* Un azul oscuro para el texto, basado en tu secundario */
+
+    --card: 0 0% 100%;
+    --card-foreground: 217 53% 18%;
+
+    --popover: 0 0% 100%;
+    --popover-foreground: 217 53% 18%;
+
+    --primary: 357 63% 43%; /* Tu color primario: #B2292E */
+    --primary-foreground: 0 0% 100%; /* Blanco para texto sobre primario */
+
+    --secondary: 217 53% 24%; /* Tu color secundario: #1C355E */
+    --secondary-foreground: 0 0% 100%; /* Blanco para texto sobre secundario */
+
+    --muted: 210 40% 96.1%;
+    --muted-foreground: 215.4 16.3% 46.9%;
+
+    --accent: 188 100% 39%; /* Tu color de acento: #00AEC7 */
+    --accent-foreground: 0 0% 100%;
+
+    --destructive: 0 89% 50%; /* Tu color destructivo: #E71313 */
+    --destructive-foreground: 0 0% 100%;
+
+    --border: 214.3 31.8% 91.4%;
+    --input: 214.3 31.8% 91.4%;
+    --ring: 357 63% 43%; /* Anillo de foco con tu color primario */
+
+    --radius: 0.5rem;
+  }
+
+  .dark {
+    /* Aquí podrías definir una paleta oscura si la necesitas en el futuro */
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+  body {
+    @apply bg-background text-foreground;
+  }
+}
