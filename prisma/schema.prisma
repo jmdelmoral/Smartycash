@@ -21,6 +21,10 @@ model User {
   name                 String?  // Nombre opcional
   role                 UserRole @default(AgenteCC) // Rol del usuario, por defecto 'AgenteCC' (o el que consideres más adecuado)
   mustChangePassword   Boolean  @default(false) // Indica si el usuario debe cambiar su contraseña al iniciar sesión
+  passwordHash         String?  // Hash de contraseña (scrypt)
+  isActive             Boolean  @default(true)
+  createdAt            DateTime @default(now())
+  updatedAt            DateTime @updatedAt
 }
 
 // Enum para los roles de usuario, reflejando el tipo UserRole de tu aplicación.

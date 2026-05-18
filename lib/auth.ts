@@ -8,6 +8,8 @@ import KeycloakProvider from 'next-auth/providers/keycloak';
 import { z } from 'zod';
 
 import { authenticateUser, ensureSeedAdminUser, getUserByEmail } from '@/lib/user-store';
+import { PrismaAdapter } from '@next-auth/prisma-adapter';
+import prisma from '@/lib/prisma';
 
 interface KeycloakJwtPayload extends jose.JWTPayload {
   realm_access?: {
@@ -36,6 +38,7 @@ const isKeycloakConfigured =
  */
 export const authOptions: NextAuthOptions = {
   secret: process.env.NEXTAUTH_SECRET ?? 'dev-smartycash-secret-change-this',
+  adapter: PrismaAdapter(prisma),
   providers: [
     CredentialsProvider({
       name: 'Credenciales SmartyCash',
@@ -44,7 +47,7 @@ export const authOptions: NextAuthOptions = {
         password: { label: 'Contraseña', type: 'password' },
       },
       async authorize(credentials) {
-        ensureSeedAdminUser();
+        await ensureSeedAdminUser();
         const credentialsSchema = z.object({
           email: z.string().trim().email(),
           password: z.string().min(1),
@@ -53,7 +56,7 @@ export const authOptions: NextAuthOptions = {
         if (!parsed.success) {
           return null;
         }
-        const user = authenticateUser(parsed.data.email, parsed.data.password);
+        const user = await authenticateUser(parsed.data.email, parsed.data.password);
         if (!user) {
           return null;
         }
@@ -121,7 +124,7 @@ export const authOptions: NextAuthOptions = {
       }
 
       if (token.email) {
-        const storedUser = getUserByEmail(String(token.email));
+        const storedUser = await getUserByEmail(String(token.email));
         if (storedUser) {
           token.roles = [storedUser.role];
           token.mustChangePassword = storedUser.mustChangePassword;

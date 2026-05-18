@@ -1,0 +1,115 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+// Looking for ways to speed up your queries, or scale easily with your serverless or edge functions?
+// Try Prisma Accelerate: https://pris.ly/cli/accelerate-init
+
+generator client {
+  provider = "prisma-client-js"
+  output   = "../lib/generated/prisma"
+}
+
+datasource db {
+  provider = "mysql"
+  url      = env("DATABASE_URL")
+}
+
+// Define tus modelos aquí. Por ejemplo, un modelo de Usuario:
+model User {
+  id                 String   @id @default(cuid()) // ID único para el usuario
+  email              String   @unique // Correo electrónico único
+  name               String?  // Nombre opcional
+  role               UserRole @default(AgenteCC) // Rol del usuario, por defecto 'AgenteCC' (o el que consideres más adecuado)
+  mustChangePassword Boolean  @default(false) // Indica si el usuario debe cambiar su contraseña al iniciar sesión
+  passwordHash       String?
+  isActive           Boolean  @default(true)
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+}
+
+// Modelo para Clientes
+model Client {
+  id                String               @id @default(cuid())
+  name              String               @unique
+  navitaireCode     String?              @unique
+  sapBP             String?
+  cobranzaDocuments CobranzaMainDocument[]
+}
+
+// Modelo para Documentos Principales de Cobranza (Facturas, Notas de Crédito)
+model CobranzaMainDocument {
+  id            String                 @id @default(cuid())
+  type          CobranzaDocumentType
+  date          DateTime
+  country       String
+  totalAmount   Float
+  pendingAmount Float
+  status        CobranzaDocumentStatus
+  clientId      String
+  client        Client                 @relation(fields: [clientId], references: [id])
+  payments      Payment[]
+  subDocuments  SubDocument[]
+}
+
+// Modelo para SubDocumentos (PNRs, referencias dentro de un documento principal)
+model SubDocument {
+  id                     String             @id @default(cuid())
+  reference              String
+  amount                 Float
+  detail                 String?
+  cobranzaMainDocumentId String
+  cobranzaMainDocument   CobranzaMainDocument @relation(fields: [cobranzaMainDocumentId], references: [id])
+}
+
+// Modelo para Movimientos de Cartola Bancaria
+model CartolaMovement {
+  id                   String               @id @default(cuid())
+  amount               Float
+  date                 DateTime
+  bank                 String
+  mainIdentification   MainIdentificationType
+  mainIdentificationId String? // Podría ser el ID de la entidad que lo identificó (ej: CobranzaMainDocument.id)
+  payments             Payment[] // Pagos que se originaron de este movimiento
+}
+
+// Modelo para Pagos (asociaciones entre movimientos y documentos de cobranza)
+model Payment {
+  id                     String               @id @default(cuid())
+  amount                 Float
+  date                   DateTime
+  bank                   String
+  movementId             String? // Opcional, si el pago viene de un movimiento bancario
+  movement               CartolaMovement?     @relation(fields: [movementId], references: [id])
+  cobranzaMainDocumentId String
+  cobranzaMainDocument   CobranzaMainDocument @relation(fields: [cobranzaMainDocumentId], references: [id])
+}
+
+// Enum para los tipos de documentos de cobranza
+enum CobranzaDocumentType {
+  Factura
+  NotaDeCredito @map("Nota de Crédito")
+}
+
+// Enum para el estado de los documentos de cobranza
+enum CobranzaDocumentStatus {
+  Pendiente
+  Pagado
+  Parcial
+}
+
+// Enum para los tipos de identificación de movimientos de cartola
+enum MainIdentificationType {
+  SinIdentificar @map("Sin identificar")
+  CobranzaCredito @map("Cobranza crédito")
+}
+
+// Enum para los roles de usuario, reflejando el tipo UserRole de tu aplicación.
+// Se usa @map para mantener los nombres originales con espacios si es necesario.
+enum UserRole {
+  Administrador
+  Contabilidad
+  Recaudacion
+  ConciliacionMediosDePago @map("Conciliación medios de pago") // Mapeo para nombres con espacios
+  AgenteCC                 @map("Agente CC") // Mapeo para nombres con espacios
+  Cobranza
+}
