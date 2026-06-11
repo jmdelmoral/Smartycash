@@ -5,10 +5,10 @@ import Image from 'next/image';
 import { signIn } from 'next-auth/react';
 import { useState } from 'react';
 
+import packageInfo from '../../../package.json';
+
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
-
-import packageInfo from '../../../package.json';
 
 const { name, version } = packageInfo;
 
@@ -25,11 +25,15 @@ export default function SignIn() {
       redirect: false,
     });
     if (response?.error) {
-      setErrorMessage('Credenciales inválidas o usuario inactivo.');
+      setErrorMessage(response.error || 'Credenciales inválidas o usuario inactivo.');
       return;
     }
     window.location.href = '/';
   };
+
+  const keycloakAvailable =
+    !!process.env.NEXT_PUBLIC_KEYCLOAK_ISSUER &&
+    !process.env.NEXT_PUBLIC_KEYCLOAK_ISSUER.includes('tu-servidor-keycloak');
 
   const handleKeycloakSignIn = () => {
     signIn('keycloak', {
@@ -118,14 +122,20 @@ export default function SignIn() {
               </Button>
             </div>
 
-            <Button
-              onClick={handleKeycloakSignIn}
-              className="w-full bg-gradient-to-r from-[#a62733] to-[#8a1f2a] hover:from-[#8a1f2a] hover:to-[#6d1520] text-white hover:text-white py-3 rounded-xl shadow-lg hover:shadow-xl transition-all duration-300 group"
-              size="lg"
-            >
-              <Lock className="w-5 h-5 mr-2 group-hover:scale-110 transition-transform" />
-              Iniciar Sesión con JetSMART
-            </Button>
+            {keycloakAvailable ? (
+              <Button
+                onClick={handleKeycloakSignIn}
+                className="w-full bg-gradient-to-r from-[#a62733] to-[#8a1f2a] hover:from-[#8a1f2a] hover:to-[#6d1520] text-white hover:text-white py-3 rounded-xl shadow-lg hover:shadow-xl transition-all duration-300 group"
+                size="lg"
+              >
+                <Lock className="w-5 h-5 mr-2 group-hover:scale-110 transition-transform" />
+                Iniciar Sesión con JetSMART
+              </Button>
+            ) : (
+              <div className="rounded-xl border border-slate-200 bg-slate-50 p-4 text-sm text-slate-600">
+                El acceso con JetSMART no está configurado. Usa la opción de correo y contraseña.
+              </div>
+            )}
 
             {/* Footer */}
             <div className="mt-6 text-center">

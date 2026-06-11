@@ -1,7 +1,7 @@
 'use client';
 
-import { useMemo, useState } from 'react';
 import { useSession } from 'next-auth/react';
+import { useMemo, useState } from 'react';
 import * as XLSX from 'xlsx';
 import { z } from 'zod';
 
@@ -42,32 +42,36 @@ const csvHeaders = [
 const cartolaSchema = z.object({
   Monto: z.coerce.number().positive(),
   Descripción: z.string().min(1),
-  Fecha: z.preprocess((val) => {
-    if (typeof val === 'number') {
-      // Assuming Excel date serial number
-      const parsedDate = XLSX.SSF.parse_date_code(val);
-      // Construct a Date object from parsed components (month is 0-indexed in JS Date)
-      const date = new Date(parsedDate.y, parsedDate.m - 1, parsedDate.d);
-      return date.toISOString().split('T')[0]; // Convert to YYYY-MM-DD
-    }
-    if (typeof val === 'string') {
-      // Attempt to normalize string dates to YYYY-MM-DD
-      const parts = val.split(/[/|-]/);
-      if (parts.length === 3) {
-        // Assuming DD/MM/YYYY or DD-MM-YYYY
-        if (parts[2].length === 4) { // DD/MM/YYYY
-          return `${parts[2]}-${parts[1].padStart(2, '0')}-${parts[0].padStart(2, '0')}`;
-        }
-        // Assuming YYYY/MM/DD or YYYY-MM-DD
-        if (parts[0].length === 4) {
-          return `${parts[0]}-${parts[1].padStart(2, '0')}-${parts[2].padStart(2, '0')}`;
-        }
+  Fecha: z.preprocess(
+    (val) => {
+      if (typeof val === 'number') {
+        // Assuming Excel date serial number
+        const parsedDate = XLSX.SSF.parse_date_code(val);
+        // Construct a Date object from parsed components (month is 0-indexed in JS Date)
+        const date = new Date(parsedDate.y, parsedDate.m - 1, parsedDate.d);
+        return date.toISOString().split('T')[0]; // Convert to YYYY-MM-DD
       }
-      const d = new Date(val);
-      if (!isNaN(d.getTime())) return d.toISOString().split('T')[0];
-    }
-    return val; // Let z.string() handle invalid formats
-  }, z.string().min(4, 'La fecha es obligatoria y debe tener al menos 4 caracteres (YYYY-MM-DD)')),
+      if (typeof val === 'string') {
+        // Attempt to normalize string dates to YYYY-MM-DD
+        const parts = val.split(/[/|-]/);
+        if (parts.length === 3) {
+          // Assuming DD/MM/YYYY or DD-MM-YYYY
+          if (parts[2].length === 4) {
+            // DD/MM/YYYY
+            return `${parts[2]}-${parts[1].padStart(2, '0')}-${parts[0].padStart(2, '0')}`;
+          }
+          // Assuming YYYY/MM/DD or YYYY-MM-DD
+          if (parts[0].length === 4) {
+            return `${parts[0]}-${parts[1].padStart(2, '0')}-${parts[2].padStart(2, '0')}`;
+          }
+        }
+        const d = new Date(val);
+        if (!isNaN(d.getTime())) return d.toISOString().split('T')[0];
+      }
+      return val; // Let z.string() handle invalid formats
+    },
+    z.string().min(4, 'La fecha es obligatoria y debe tener al menos 4 caracteres (YYYY-MM-DD)')
+  ),
   Banco: z.string().min(1, 'El banco es obligatorio'),
   Cuenta: z.coerce.string().min(1, 'La cuenta es obligatoria'),
   País: z.string().min(1, 'El país es obligatorio'),
@@ -76,11 +80,14 @@ const cartolaSchema = z.object({
   Adicional3: z.string().optional().default(''),
   Adicional4: z.string().optional().default(''),
   Adicional5: z.string().optional().default(''),
-  TipoPrincipal: z.preprocess((value) => {
-    if (value === null || value === undefined) return 'Sin identificar';
-    const normalized = String(value).trim();
-    return normalized === '' ? 'Sin identificar' : normalized;
-  }, z.enum(['Sin identificar', 'Adquiriente', 'GC', 'Cobranza crédito'])),
+  TipoPrincipal: z.preprocess(
+    (value) => {
+      if (value === null || value === undefined) return 'Sin identificar';
+      const normalized = String(value).trim();
+      return normalized === '' ? 'Sin identificar' : normalized;
+    },
+    z.enum(['Sin identificar', 'Adquiriente', 'GC', 'Cobranza crédito'])
+  ),
 });
 
 const documentDetailsUploadSchema = z.object({
@@ -88,7 +95,9 @@ const documentDetailsUploadSchema = z.object({
   Referencia: z.string().min(1),
   Monto: z.coerce.number().positive(),
   Detalle: z.string().optional().default(''),
-  TipoPrincipal: z.enum(['Sin identificar', 'Adquiriente', 'GC', 'Cobranza crédito']).default('Sin identificar'),
+  TipoPrincipal: z
+    .enum(['Sin identificar', 'Adquiriente', 'GC', 'Cobranza crédito'])
+    .default('Sin identificar'),
 });
 
 function generateId(prefix: string): string {
@@ -97,7 +106,11 @@ function generateId(prefix: string): string {
 }
 const ITEMS_PER_PAGE = 100;
 
-export function BankStatementManagement({ availableAccounts, movements, setMovements }: BankStatementManagementProps) {
+export function BankStatementManagement({
+  availableAccounts,
+  movements,
+  setMovements,
+}: BankStatementManagementProps) {
   const { data: session } = useSession();
   const [selectedMovementId, setSelectedMovementId] = useState<string | null>(null);
   const [uploadError, setUploadError] = useState<string | null>(null);
@@ -153,12 +166,18 @@ export function BankStatementManagement({ availableAccounts, movements, setMovem
   );
 
   // Filter options based on loaded data
-  const uniqueBanks = useMemo(() => Array.from(new Set(movements.map(m => m.bank))), [movements]);
-  const uniqueAccounts = useMemo(() => Array.from(new Set(movements.map(m => m.bankAccount))), [movements]);
-  const uniqueCountries = useMemo(() => Array.from(new Set(movements.map(m => m.country))), [movements]);
+  const uniqueBanks = useMemo(() => Array.from(new Set(movements.map((m) => m.bank))), [movements]);
+  const uniqueAccounts = useMemo(
+    () => Array.from(new Set(movements.map((m) => m.bankAccount))),
+    [movements]
+  );
+  const uniqueCountries = useMemo(
+    () => Array.from(new Set(movements.map((m) => m.country))),
+    [movements]
+  );
 
   const filteredMovements = useMemo(() => {
-    return movements.filter(m => {
+    return movements.filter((m) => {
       const matchBank = bankFilter === 'all' || m.bank === bankFilter;
       const matchAccount = accountFilter === 'all' || m.bankAccount === accountFilter;
       const matchCountry = countryFilter === 'all' || m.country === countryFilter;
@@ -173,7 +192,8 @@ export function BankStatementManagement({ availableAccounts, movements, setMovem
   );
 
   const unidentifiedRate = useMemo(
-    () => (filteredMovements.length === 0 ? 0 : (unidentifiedCount / filteredMovements.length) * 100),
+    () =>
+      filteredMovements.length === 0 ? 0 : (unidentifiedCount / filteredMovements.length) * 100,
     [filteredMovements.length, unidentifiedCount]
   );
 
@@ -204,7 +224,8 @@ export function BankStatementManagement({ availableAccounts, movements, setMovem
 
   const onDownloadCartolaTemplate = () => {
     const headers = csvHeaders.join(',');
-    const sample = '10000,Abono ejemplo,2026-04-21,Banco Estado,12345678,Chile,C1,C2,C3,C4,C5,Sin identificar';
+    const sample =
+      '10000,Abono ejemplo,2026-04-21,Banco Estado,12345678,Chile,C1,C2,C3,C4,C5,Sin identificar';
     const blob = new Blob([`${headers}\n${sample}\n`], { type: 'text/csv;charset=utf-8;' });
     const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
@@ -230,34 +251,36 @@ export function BankStatementManagement({ availableAccounts, movements, setMovem
   };
 
   const onExportDocumentDetails = () => {
-    const data = movements.flatMap(m => m.documents.map(d => ({
-      MovimientoID: m.movementId,
-      Banco: m.bank,
-      Cuenta: m.bankAccount,
-      Referencia: d.reference,
-      Monto: d.amount,
-      Detalle: d.detail,
-      Tipo: m.mainIdentification
-    })));
+    const data = movements.flatMap((m) =>
+      m.documents.map((d) => ({
+        MovimientoID: m.movementId,
+        Banco: m.bank,
+        Cuenta: m.bankAccount,
+        Referencia: d.reference,
+        Monto: d.amount,
+        Detalle: d.detail,
+        Tipo: m.mainIdentification,
+      }))
+    );
     const ws = XLSX.utils.json_to_sheet(data);
     const wb = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb, ws, "Detalles");
-    XLSX.writeFile(wb, "detalle_documentos_smarty.xlsx");
+    XLSX.utils.book_append_sheet(wb, ws, 'Detalles');
+    XLSX.writeFile(wb, 'detalle_documentos_smarty.xlsx');
   };
 
   const onExportMovements = () => {
-    const data = prioritizedMovements.map(m => ({
+    const data = prioritizedMovements.map((m) => ({
       ID: m.movementId,
       Banco: m.bank,
       Cuenta: m.bankAccount,
       Monto: m.amount,
       Fecha: m.date,
-      Tipo: m.mainIdentification
+      Tipo: m.mainIdentification,
     }));
     const ws = XLSX.utils.json_to_sheet(data);
     const wb = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb, ws, "Movimientos");
-    XLSX.writeFile(wb, "movimientos_cartola_smarty.xlsx");
+    XLSX.utils.book_append_sheet(wb, ws, 'Movimientos');
+    XLSX.writeFile(wb, 'movimientos_cartola_smarty.xlsx');
   };
 
   const readRowsFromFile = async (file: File): Promise<Record<string, unknown>[]> => {
@@ -293,14 +316,16 @@ export function BankStatementManagement({ availableAccounts, movements, setMovem
             acc[header] = rawRow[header];
             return acc;
           }, {});
-          
+
           const row = cartolaSchema.parse(normalizedRow);
           const accountExists = availableAccounts.some(
-            acc => acc.bankName.toLowerCase() === row.Banco.toLowerCase() && 
-                   acc.accountNumber === row.Cuenta
+            (acc) =>
+              acc.bankName.toLowerCase() === row.Banco.toLowerCase() &&
+              acc.accountNumber === row.Cuenta
           );
 
-          if (!accountExists) throw new Error(`La cuenta ${row.Cuenta} de ${row.Banco} no está registrada.`);
+          if (!accountExists)
+            throw new Error(`La cuenta ${row.Cuenta} de ${row.Banco} no está registrada.`);
 
           return {
             movementId: generateId('MOV'),
@@ -311,7 +336,13 @@ export function BankStatementManagement({ availableAccounts, movements, setMovem
             country: row.País,
             description: row.Descripción,
             date: row.Fecha,
-            extraFields: [row.Adicional1 ?? '', row.Adicional2 ?? '', row.Adicional3 ?? '', row.Adicional4 ?? '', row.Adicional5 ?? ''],
+            extraFields: [
+              row.Adicional1 ?? '',
+              row.Adicional2 ?? '',
+              row.Adicional3 ?? '',
+              row.Adicional4 ?? '',
+              row.Adicional5 ?? '',
+            ],
             mainIdentification: row.TipoPrincipal,
             mainIdentificationId: mainIdentificationMap[row.TipoPrincipal],
             documents: [],
@@ -320,54 +351,64 @@ export function BankStatementManagement({ availableAccounts, movements, setMovem
         setPendingUploadMovements(newMovements);
       } else {
         // MODO DETALLE DOCS: Validaciones y limpieza de duplicados
-        const parsedRows = rows.map(r => documentDetailsUploadSchema.parse(r));
-        
-        // Agrupamos por MovimientoID para validar integridad antes de aplicar
-        const groupedByMov = parsedRows.reduce((acc, curr) => {
-          if (!acc[curr.MovimientoID]) acc[curr.MovimientoID] = [];
-          acc[curr.MovimientoID].push(curr);
-          return acc;
-        }, {} as Record<string, typeof parsedRows>);
+        const parsedRows = rows.map((r) => documentDetailsUploadSchema.parse(r));
 
-        setMovements(prev => {
+        // Agrupamos por MovimientoID para validar integridad antes de aplicar
+        const groupedByMov = parsedRows.reduce(
+          (acc, curr) => {
+            if (!acc[curr.MovimientoID]) acc[curr.MovimientoID] = [];
+            acc[curr.MovimientoID].push(curr);
+            return acc;
+          },
+          {} as Record<string, typeof parsedRows>
+        );
+
+        setMovements((prev) => {
           const nextMovements = [...prev];
-          
+
           for (const movId in groupedByMov) {
             const details = groupedByMov[movId]!;
-            const movement = nextMovements.find(m => m.movementId === movId);
-            
+            const movement = nextMovements.find((m) => m.movementId === movId);
+
             if (!movement) throw new Error(`El MovimientoID ${movId} no existe.`);
-            
+
             // 1. Validar Tipo Único
             const firstType = details[0]!.TipoPrincipal;
-            if (details.some(d => d.TipoPrincipal !== firstType)) {
-              throw new Error(`Inconsistencia en ID ${movId}: Múltiples tipos principales detectados.`);
+            if (details.some((d) => d.TipoPrincipal !== firstType)) {
+              throw new Error(
+                `Inconsistencia en ID ${movId}: Múltiples tipos principales detectados.`
+              );
             }
 
             // 2. Validar Cuadratura de Montos
             const totalDetails = details.reduce((sum, d) => sum + d.Monto, 0);
             if (totalDetails !== movement.amount) {
-              throw new Error(`Cuadratura fallida en ID ${movId}: Cartola $${movement.amount} vs Excel $${totalDetails}.`);
+              throw new Error(
+                `Cuadratura fallida en ID ${movId}: Cartola $${movement.amount} vs Excel $${totalDetails}.`
+              );
             }
 
             // 3. Limpiar y Reemplazar (Previene duplicados)
-            movement.documents = details.map(d => ({
+            movement.documents = details.map((d) => ({
               id: generateId('DOC'),
               reference: d.Referencia,
               amount: d.Monto,
-              detail: d.Detalle
+              detail: d.Detalle,
             }));
             movement.mainIdentification = firstType;
             movement.mainIdentificationId = mainIdentificationMap[firstType];
           }
-          
+
           return nextMovements;
         });
-        setUploadOkMessage(`Carga exitosa. Se actualizaron ${Object.keys(groupedByMov).length} movimientos.`);
+        setUploadOkMessage(
+          `Carga exitosa. Se actualizaron ${Object.keys(groupedByMov).length} movimientos.`
+        );
       }
 
       setPendingUploadFileName(file.name);
-      if (uploadMode === 'movements') setUploadOkMessage('Archivo procesado. Revisa y confirma la carga.');
+      if (uploadMode === 'movements')
+        setUploadOkMessage('Archivo procesado. Revisa y confirma la carga.');
     } catch (error) {
       const message = error instanceof Error ? error.message : 'No fue posible procesar la carga.';
       setUploadError(message);
@@ -392,7 +433,7 @@ export function BankStatementManagement({ availableAccounts, movements, setMovem
       setUploadError('No se puede eliminar un movimiento ya identificado/conciliado.');
       return;
     }
-    
+
     setMovements((prev) => prev.filter((m) => m.movementId !== movementId));
     if (selectedMovementId === movementId) {
       setSelectedMovementId(null);
@@ -425,7 +466,12 @@ export function BankStatementManagement({ availableAccounts, movements, setMovem
     }
     setEditDocuments((prev) => [
       ...prev,
-      { id: generateId('DOC'), reference: editDocumentRef.trim(), detail: editDocumentDetail.trim(), amount },
+      {
+        id: generateId('DOC'),
+        reference: editDocumentRef.trim(),
+        detail: editDocumentDetail.trim(),
+        amount,
+      },
     ]);
     setEditDocumentRef('');
     setEditDocumentDetail('');
@@ -441,12 +487,16 @@ export function BankStatementManagement({ availableAccounts, movements, setMovem
     if (editType === 'Sin identificar') {
       // Lógica de reversión: Al volver a "Sin identificar", borramos los documentos
       setMovements((prev) =>
-        prev.map((m) => (m.movementId === editingMovementId ? { 
-          ...m, 
-          documents: [], 
-          mainIdentification: 'Sin identificar',
-          mainIdentificationId: mainIdentificationMap['Sin identificar']
-        } : m))
+        prev.map((m) =>
+          m.movementId === editingMovementId
+            ? {
+                ...m,
+                documents: [],
+                mainIdentification: 'Sin identificar',
+                mainIdentificationId: mainIdentificationMap['Sin identificar'],
+              }
+            : m
+        )
       );
       setIsDocumentModalOpen(false);
       setEditingMovementId(null);
@@ -465,12 +515,16 @@ export function BankStatementManagement({ availableAccounts, movements, setMovem
     }
 
     setMovements((prev) =>
-      prev.map((m) => (m.movementId === editingMovementId ? { 
-        ...m, 
-        documents: editDocuments,
-        mainIdentification: editType,
-        mainIdentificationId: mainIdentificationMap[editType]
-      } : m))
+      prev.map((m) =>
+        m.movementId === editingMovementId
+          ? {
+              ...m,
+              documents: editDocuments,
+              mainIdentification: editType,
+              mainIdentificationId: mainIdentificationMap[editType],
+            }
+          : m
+      )
     );
     setIsDocumentModalOpen(false);
     setEditingMovementId(null);
@@ -492,7 +546,7 @@ export function BankStatementManagement({ availableAccounts, movements, setMovem
       setManualError(`La suma (${documentsTotal}) debe ser igual al monto (${amount}).`);
       return;
     }
-    const selectedAcc = availableAccounts.find(a => a.id === manualAccountId);
+    const selectedAcc = availableAccounts.find((a) => a.id === manualAccountId);
     if (!selectedAcc) {
       setManualError('Debes seleccionar una cuenta bancaria destino.');
       return;
@@ -526,24 +580,38 @@ export function BankStatementManagement({ availableAccounts, movements, setMovem
         <div className="flex items-center justify-between gap-4 mb-4">
           <h3 className="text-lg font-semibold">Módulo de Carga</h3>
           <div className="flex bg-slate-100 p-1 rounded-md">
-            <button 
+            <button
               className={`px-3 py-1 text-xs rounded-md transition-all ${uploadMode === 'movements' ? 'bg-white shadow-sm font-medium' : 'text-slate-500'}`}
               onClick={() => setUploadMode('movements')}
-            >Cartola</button>
-            <button 
+            >
+              Cartola
+            </button>
+            <button
               className={`px-3 py-1 text-xs rounded-md transition-all ${uploadMode === 'details' ? 'bg-white shadow-sm font-medium' : 'text-slate-500'}`}
               onClick={() => setUploadMode('details')}
-            >Detalle Docs</button>
+            >
+              Detalle Docs
+            </button>
           </div>
         </div>
 
         <div className="flex flex-wrap items-center gap-3">
-          <Button variant="outline" onClick={uploadMode === 'movements' ? onDownloadCartolaTemplate : onDownloadDetailsTemplate}>
+          <Button
+            variant="outline"
+            onClick={
+              uploadMode === 'movements' ? onDownloadCartolaTemplate : onDownloadDetailsTemplate
+            }
+          >
             Descargar plantilla {uploadMode === 'movements' ? 'Cartola' : 'Detalles'}
           </Button>
           <label className="cursor-pointer rounded-md border bg-white px-3 py-2 text-sm hover:bg-slate-50">
             Subir {uploadMode === 'movements' ? 'Cartola' : 'Excel de Detalles'}
-            <input className="hidden" type="file" accept=".csv,.xlsx,.xls" onChange={onCartolaFileUpload} />
+            <input
+              className="hidden"
+              type="file"
+              accept=".csv,.xlsx,.xls"
+              onChange={onCartolaFileUpload}
+            />
           </label>
           <Button variant="secondary" onClick={onExportMovements}>
             Exportar Movimientos
@@ -557,10 +625,22 @@ export function BankStatementManagement({ availableAccounts, movements, setMovem
         {uploadOkMessage && <p className="mt-2 text-sm text-emerald-600">{uploadOkMessage}</p>}
         {pendingUploadMovements.length > 0 && (
           <div className="mt-3 rounded-md border bg-slate-50 p-3 text-sm">
-            <p><span className="font-semibold">Archivo:</span> {pendingUploadFileName}</p>
-            <p><span className="font-semibold">Movimientos:</span> {pendingUploadMovements.length}</p>
-            <p><span className="font-semibold">Monto total:</span> {pendingUploadTotalAmount.toLocaleString('es-CL', { style: 'currency', currency: 'CLP' })}</p>
-            <Button className="mt-2" onClick={onConfirmMassUpload}>Confirmar carga</Button>
+            <p>
+              <span className="font-semibold">Archivo:</span> {pendingUploadFileName}
+            </p>
+            <p>
+              <span className="font-semibold">Movimientos:</span> {pendingUploadMovements.length}
+            </p>
+            <p>
+              <span className="font-semibold">Monto total:</span>{' '}
+              {pendingUploadTotalAmount.toLocaleString('es-CL', {
+                style: 'currency',
+                currency: 'CLP',
+              })}
+            </p>
+            <Button className="mt-2" onClick={onConfirmMassUpload}>
+              Confirmar carga
+            </Button>
           </div>
         )}
       </div>
@@ -571,41 +651,77 @@ export function BankStatementManagement({ availableAccounts, movements, setMovem
           <h3 className="text-lg font-semibold">Movimientos cartola</h3>
           <Button onClick={() => setIsMovementModalOpen(true)}>Agregar movimiento</Button>
         </div>
-        
+
         {/* Panel de Filtros */}
         <div className="mb-4 grid grid-cols-1 gap-4 sm:grid-cols-4">
           <div className="flex flex-col gap-1">
             <label className="text-xs font-medium text-slate-500">Banco</label>
-            <select className="h-9 rounded-md border bg-white px-2 text-sm" value={bankFilter} onChange={(e) => setBankFilter(e.target.value)}>
+            <select
+              className="h-9 rounded-md border bg-white px-2 text-sm"
+              value={bankFilter}
+              onChange={(e) => setBankFilter(e.target.value)}
+            >
               <option value="all">Todos los bancos</option>
-              {uniqueBanks.map(b => <option key={b} value={b}>{b}</option>)}
+              {uniqueBanks.map((b) => (
+                <option key={b} value={b}>
+                  {b}
+                </option>
+              ))}
             </select>
           </div>
           <div className="flex flex-col gap-1">
             <label className="text-xs font-medium text-slate-500">Cuenta</label>
-            <select className="h-9 rounded-md border bg-white px-2 text-sm" value={accountFilter} onChange={(e) => setAccountFilter(e.target.value)}>
+            <select
+              className="h-9 rounded-md border bg-white px-2 text-sm"
+              value={accountFilter}
+              onChange={(e) => setAccountFilter(e.target.value)}
+            >
               <option value="all">Todas las cuentas</option>
-              {uniqueAccounts.map(a => <option key={a} value={a}>{a}</option>)}
+              {uniqueAccounts.map((a) => (
+                <option key={a} value={a}>
+                  {a}
+                </option>
+              ))}
             </select>
           </div>
           <div className="flex flex-col gap-1">
             <label className="text-xs font-medium text-slate-500">País</label>
-            <select className="h-9 rounded-md border bg-white px-2 text-sm" value={countryFilter} onChange={(e) => setCountryFilter(e.target.value)}>
+            <select
+              className="h-9 rounded-md border bg-white px-2 text-sm"
+              value={countryFilter}
+              onChange={(e) => setCountryFilter(e.target.value)}
+            >
               <option value="all">Todos los países</option>
-              {uniqueCountries.map(p => <option key={p} value={p}>{p}</option>)}
+              {uniqueCountries.map((p) => (
+                <option key={p} value={p}>
+                  {p}
+                </option>
+              ))}
             </select>
           </div>
           <div className="flex flex-col gap-1">
             <label className="text-xs font-medium text-slate-500">Tipo</label>
-            <select className="h-9 rounded-md border bg-white px-2 text-sm" value={typeFilter} onChange={(e) => setTypeFilter(e.target.value)}>
+            <select
+              className="h-9 rounded-md border bg-white px-2 text-sm"
+              value={typeFilter}
+              onChange={(e) => setTypeFilter(e.target.value)}
+            >
               <option value="all">Todos los tipos</option>
-              {['Sin identificar', 'Adquiriente', 'GC', 'Cobranza crédito'].map(t => <option key={t} value={t}>{t}</option>)}
+              {['Sin identificar', 'Adquiriente', 'GC', 'Cobranza crédito'].map((t) => (
+                <option key={t} value={t}>
+                  {t}
+                </option>
+              ))}
             </select>
           </div>
         </div>
 
-        <section className={`mb-3 rounded-md border p-3 text-sm ${unidentifiedRate > 20 ? 'border-red-200 bg-red-50 text-red-700' : unidentifiedRate > 10 ? 'border-amber-200 bg-amber-50 text-amber-700' : 'border-emerald-200 bg-emerald-50 text-emerald-700'}`}>
-          Movimientos sin identificar: <span className="font-semibold">{unidentifiedCount}</span> de <span className="font-semibold">{filteredMovements.length}</span> (<span className="font-semibold">{unidentifiedRate.toFixed(1)}%</span>).
+        <section
+          className={`mb-3 rounded-md border p-3 text-sm ${unidentifiedRate > 20 ? 'border-red-200 bg-red-50 text-red-700' : unidentifiedRate > 10 ? 'border-amber-200 bg-amber-50 text-amber-700' : 'border-emerald-200 bg-emerald-50 text-emerald-700'}`}
+        >
+          Movimientos sin identificar: <span className="font-semibold">{unidentifiedCount}</span> de{' '}
+          <span className="font-semibold">{filteredMovements.length}</span> (
+          <span className="font-semibold">{unidentifiedRate.toFixed(1)}%</span>).
         </section>
         <div className="max-h-[700px] overflow-auto rounded-lg border">
           <table className="w-full min-w-[1100px] text-left text-sm">
@@ -622,26 +738,47 @@ export function BankStatementManagement({ availableAccounts, movements, setMovem
             </thead>
             <tbody>
               {paginatedMovements.map((m) => (
-                <tr key={m.movementId} className={`border-t align-top transition-colors ${m.mainIdentification !== 'Sin identificar' ? 'bg-emerald-50/40' : ''}`}>
+                <tr
+                  key={m.movementId}
+                  className={`border-t align-top transition-colors ${m.mainIdentification !== 'Sin identificar' ? 'bg-emerald-50/40' : ''}`}
+                >
                   <td className="px-3 py-3 text-[10px] font-mono text-slate-400">{m.movementId}</td>
                   <td className="px-3 py-3">
                     <div className="font-medium">{m.bank}</div>
-                    <div className="text-[10px] text-slate-500">{m.bankAccount} ({m.country})</div>
+                    <div className="text-[10px] text-slate-500">
+                      {m.bankAccount} ({m.country})
+                    </div>
                   </td>
-                  <td className="px-3 py-3">{m.amount.toLocaleString('es-CL', { style: 'currency', currency: 'CLP' })}</td>
+                  <td className="px-3 py-3">
+                    {m.amount.toLocaleString('es-CL', { style: 'currency', currency: 'CLP' })}
+                  </td>
                   <td className="px-3 py-3">{m.description}</td>
                   <td className="px-3 py-3">{m.date}</td>
                   <td className="px-3 py-3">{m.mainIdentification}</td>
                   <td className="px-3 py-3">
                     <div className="flex gap-2">
-                      <Button variant="outline" size="sm" onClick={() => setSelectedMovementId(m.movementId)}>Detalle</Button>
-                      <Button variant="outline" size="sm" onClick={() => onOpenDocumentEditor(m.movementId)}>Docs</Button>
-                      <Button 
-                        variant="destructive" 
-                        size="sm" 
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={() => setSelectedMovementId(m.movementId)}
+                      >
+                        Detalle
+                      </Button>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={() => onOpenDocumentEditor(m.movementId)}
+                      >
+                        Docs
+                      </Button>
+                      <Button
+                        variant="destructive"
+                        size="sm"
                         onClick={() => onDeleteMovement(m.movementId)}
                         disabled={m.mainIdentification !== 'Sin identificar'}
-                      >Borrar</Button>
+                      >
+                        Borrar
+                      </Button>
                     </div>
                   </td>
                 </tr>
@@ -653,17 +790,25 @@ export function BankStatementManagement({ availableAccounts, movements, setMovem
         {/* Pagination UI */}
         {totalPages > 1 && (
           <div className="mt-4 flex items-center justify-center gap-2">
-            <Button 
-              variant="outline" size="sm" 
+            <Button
+              variant="outline"
+              size="sm"
               disabled={currentPage === 1}
-              onClick={() => setCurrentPage(prev => prev - 1)}
-            >Anterior</Button>
-            <span className="text-sm font-medium">Página {currentPage} de {totalPages}</span>
-            <Button 
-              variant="outline" size="sm" 
+              onClick={() => setCurrentPage((prev) => prev - 1)}
+            >
+              Anterior
+            </Button>
+            <span className="text-sm font-medium">
+              Página {currentPage} de {totalPages}
+            </span>
+            <Button
+              variant="outline"
+              size="sm"
               disabled={currentPage === totalPages}
-              onClick={() => setCurrentPage(prev => prev + 1)}
-            >Siguiente</Button>
+              onClick={() => setCurrentPage((prev) => prev + 1)}
+            >
+              Siguiente
+            </Button>
           </div>
         )}
       </div>
@@ -686,7 +831,9 @@ export function BankStatementManagement({ availableAccounts, movements, setMovem
                   <div key={doc.id} className="rounded-md border p-2 text-sm">
                     <p className="font-medium">{doc.reference}</p>
                     <p className="text-slate-600">{doc.detail}</p>
-                    <p>{doc.amount.toLocaleString('es-CL', { style: 'currency', currency: 'CLP' })}</p>
+                    <p>
+                      {doc.amount.toLocaleString('es-CL', { style: 'currency', currency: 'CLP' })}
+                    </p>
                   </div>
                 ))
               )}
@@ -705,20 +852,36 @@ export function BankStatementManagement({ availableAccounts, movements, setMovem
             <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
               <div className="md:col-span-2 space-y-1">
                 <label className="text-xs font-medium">Cuenta Bancaria Destino</label>
-                <select 
+                <select
                   className="w-full h-10 rounded-md border bg-white px-3 text-sm"
                   value={manualAccountId}
                   onChange={(e) => setManualAccountId(e.target.value)}
                 >
                   <option value="">Selecciona una cuenta...</option>
-                  {availableAccounts.map(acc => (
-                    <option key={acc.id} value={acc.id}>{acc.bankName} - {acc.accountNumber} ({acc.country})</option>
+                  {availableAccounts.map((acc) => (
+                    <option key={acc.id} value={acc.id}>
+                      {acc.bankName} - {acc.accountNumber} ({acc.country})
+                    </option>
                   ))}
                 </select>
               </div>
-              <Input type="number" placeholder="Monto" value={manualAmount} onChange={(e) => setManualAmount(e.target.value)} />
-              <Input type="date" value={manualDate} onChange={(e) => setManualDate(e.target.value)} />
-              <Input className="md:col-span-2" placeholder="Descripción" value={manualDescription} onChange={(e) => setManualDescription(e.target.value)} />
+              <Input
+                type="number"
+                placeholder="Monto"
+                value={manualAmount}
+                onChange={(e) => setManualAmount(e.target.value)}
+              />
+              <Input
+                type="date"
+                value={manualDate}
+                onChange={(e) => setManualDate(e.target.value)}
+              />
+              <Input
+                className="md:col-span-2"
+                placeholder="Descripción"
+                value={manualDescription}
+                onChange={(e) => setManualDescription(e.target.value)}
+              />
               {manualExtras.map((val, i) => (
                 <Input
                   key={i}
@@ -736,29 +899,62 @@ export function BankStatementManagement({ availableAccounts, movements, setMovem
             <div className="mt-4 space-y-2 border-t pt-4">
               <h4 className="text-sm font-semibold">Documentos</h4>
               <div className="flex gap-2">
-                <Input placeholder="Ref" value={manualDocumentRef} onChange={(e) => setManualDocumentRef(e.target.value)} />
-                <Input type="number" placeholder="Monto" value={manualDocumentAmount} onChange={(e) => setManualDocumentAmount(e.target.value)} />
-                <Button variant="outline" onClick={() => {
-                  const amt = Number(manualDocumentAmount);
-                  if (manualDocumentRef && amt > 0) {
-                    setManualDocuments([...manualDocuments, { id: generateId('DOC'), reference: manualDocumentRef, detail: manualDocumentDetail, amount: amt }]);
-                    setManualDocumentRef('');
-                    setManualDocumentAmount('');
-                  }
-                }}>Add</Button>
+                <Input
+                  placeholder="Ref"
+                  value={manualDocumentRef}
+                  onChange={(e) => setManualDocumentRef(e.target.value)}
+                />
+                <Input
+                  type="number"
+                  placeholder="Monto"
+                  value={manualDocumentAmount}
+                  onChange={(e) => setManualDocumentAmount(e.target.value)}
+                />
+                <Button
+                  variant="outline"
+                  onClick={() => {
+                    const amt = Number(manualDocumentAmount);
+                    if (manualDocumentRef && amt > 0) {
+                      setManualDocuments([
+                        ...manualDocuments,
+                        {
+                          id: generateId('DOC'),
+                          reference: manualDocumentRef,
+                          detail: manualDocumentDetail,
+                          amount: amt,
+                        },
+                      ]);
+                      setManualDocumentRef('');
+                      setManualDocumentAmount('');
+                    }
+                  }}
+                >
+                  Add
+                </Button>
               </div>
               <div className="max-h-24 overflow-auto">
-                {manualDocuments.map(d => (
+                {manualDocuments.map((d) => (
                   <div key={d.id} className="flex justify-between text-xs border-b py-1">
-                    <span>{d.reference} - ${d.amount}</span>
-                    <button className="text-red-500" onClick={() => setManualDocuments(manualDocuments.filter(x => x.id !== d.id))}>Remove</button>
+                    <span>
+                      {d.reference} - ${d.amount}
+                    </span>
+                    <button
+                      className="text-red-500"
+                      onClick={() =>
+                        setManualDocuments(manualDocuments.filter((x) => x.id !== d.id))
+                      }
+                    >
+                      Remove
+                    </button>
                   </div>
                 ))}
               </div>
             </div>
             {manualError && <p className="mt-2 text-xs text-red-600">{manualError}</p>}
             <div className="mt-4 flex justify-end gap-2">
-              <Button variant="outline" onClick={() => setIsMovementModalOpen(false)}>Cancelar</Button>
+              <Button variant="outline" onClick={() => setIsMovementModalOpen(false)}>
+                Cancelar
+              </Button>
               <Button onClick={onCreateManualMovement}>Guardar</Button>
             </div>
           </Card>
@@ -778,28 +974,53 @@ export function BankStatementManagement({ availableAccounts, movements, setMovem
                 onChange={(e) => setEditType(e.target.value as MainIdentificationType)}
               >
                 {['Sin identificar', 'Adquiriente', 'GC', 'Cobranza crédito'].map((t) => (
-                  <option key={t} value={t}>{t}</option>
+                  <option key={t} value={t}>
+                    {t}
+                  </option>
                 ))}
               </select>
-              <p className="text-[10px] text-slate-500 italic">Si selecciona 'Sin identificar', se borrarán los documentos al guardar.</p>
+              <p className="text-[10px] text-slate-500 italic">
+                Si selecciona &quot;Sin identificar&quot;, se borraran los documentos al guardar.
+              </p>
             </div>
 
             <div className="flex gap-2 mb-4">
-              <Input placeholder="Ref" value={editDocumentRef} onChange={(e) => setEditDocumentRef(e.target.value)} />
-              <Input type="number" placeholder="Monto" value={editDocumentAmount} onChange={(e) => setEditDocumentAmount(e.target.value)} />
+              <Input
+                placeholder="Ref"
+                value={editDocumentRef}
+                onChange={(e) => setEditDocumentRef(e.target.value)}
+              />
+              <Input
+                type="number"
+                placeholder="Monto"
+                value={editDocumentAmount}
+                onChange={(e) => setEditDocumentAmount(e.target.value)}
+              />
               <Button onClick={onAddEditDocument}>Add</Button>
             </div>
             <div className="max-h-52 overflow-y-auto rounded-md border p-2">
-              {editDocuments.map(d => (
+              {editDocuments.map((d) => (
                 <div key={d.id} className="flex justify-between items-center text-sm border-b py-2">
-                  <span>{d.reference} (${d.amount})</span>
-                  <Button variant="destructive" size="sm" onClick={() => setEditDocuments(editDocuments.filter(x => x.id !== d.id))}>X</Button>
+                  <span>
+                    {d.reference} (${d.amount})
+                  </span>
+                  <Button
+                    variant="destructive"
+                    size="sm"
+                    onClick={() => setEditDocuments(editDocuments.filter((x) => x.id !== d.id))}
+                  >
+                    X
+                  </Button>
                 </div>
               ))}
             </div>
-            {editDocumentsError && <p className="mt-2 text-xs text-red-600">{editDocumentsError}</p>}
+            {editDocumentsError && (
+              <p className="mt-2 text-xs text-red-600">{editDocumentsError}</p>
+            )}
             <div className="mt-4 flex justify-end gap-2">
-              <Button variant="outline" onClick={() => setIsDocumentModalOpen(false)}>Cerrar</Button>
+              <Button variant="outline" onClick={() => setIsDocumentModalOpen(false)}>
+                Cerrar
+              </Button>
               <Button onClick={onSaveEditedDocuments}>Guardar</Button>
             </div>
           </Card>

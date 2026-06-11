@@ -1,15 +1,15 @@
 /**
  * Configuration and helper utilities for authentication.
  */
+import { PrismaAdapter } from '@next-auth/prisma-adapter';
 import * as jose from 'jose';
 import type { NextAuthOptions } from 'next-auth';
 import CredentialsProvider from 'next-auth/providers/credentials';
 import KeycloakProvider from 'next-auth/providers/keycloak';
 import { z } from 'zod';
 
-import { authenticateUser, ensureSeedAdminUser, getUserByEmail } from '@/lib/user-store';
-import { PrismaAdapter } from '@next-auth/prisma-adapter';
 import prisma from '@/lib/prisma';
+import { authenticateUser, ensureSeedAdminUser, getUserByEmail } from '@/lib/user-store';
 
 interface KeycloakJwtPayload extends jose.JWTPayload {
   realm_access?: {
@@ -39,6 +39,9 @@ const isKeycloakConfigured =
 export const authOptions: NextAuthOptions = {
   secret: process.env.NEXTAUTH_SECRET ?? 'dev-smartycash-secret-change-this',
   adapter: PrismaAdapter(prisma),
+  session: {
+    strategy: 'jwt',
+  },
   providers: [
     CredentialsProvider({
       name: 'Credenciales SmartyCash',

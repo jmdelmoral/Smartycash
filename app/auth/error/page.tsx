@@ -29,7 +29,9 @@ export default async function AuthErrorPage({ searchParams }: AuthErrorPageProps
   const rawError = resolvedSearchParams.error;
   const errorCode = Array.isArray(rawError) ? rawError[0] : rawError;
   const error = errorCode as keyof typeof errorMessages | undefined;
-  const errorMessage = errorMessages[error] || errorMessages.Default;
+  const errorMessage = error
+    ? errorMessages[error] || errorMessages.Default
+    : errorMessages.Default;
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-gray-50 to-white flex items-center justify-center p-4">

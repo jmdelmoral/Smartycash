@@ -1,12 +1,13 @@
 import { randomBytes, scryptSync, timingSafeEqual } from 'crypto';
+
 import prisma from './prisma';
 
 export type UserRole =
   | 'Administrador'
   | 'Contabilidad'
-  | 'Recaudación'
-  | 'Conciliación medios de pago'
-  | 'Agente CC'
+  | 'Recaudacion'
+  | 'ConciliacionMediosDePago'
+  | 'AgenteCC'
   | 'Cobranza';
 
 export type AppUser = {
@@ -74,7 +75,10 @@ export async function ensureSeedAdminUser(): Promise<void> {
   });
 }
 
-export async function authenticateUser(email: string, password: string): Promise<PublicUser | null> {
+export async function authenticateUser(
+  email: string,
+  password: string
+): Promise<PublicUser | null> {
   await ensureSeedAdminUser();
   const user = await prisma.user.findUnique({ where: { email: email.toLowerCase() } });
   if (!user || !user.isActive || !user.passwordHash) return null;
@@ -94,7 +98,11 @@ export async function getUserByEmail(email: string): Promise<PublicUser | null> 
   return user ? toPublicUser(user) : null;
 }
 
-export async function createUser(input: { name: string; email: string; role: UserRole }): Promise<{ user: PublicUser; temporaryPassword: string }> {
+export async function createUser(input: {
+  name: string;
+  email: string;
+  role: UserRole;
+}): Promise<{ user: PublicUser; temporaryPassword: string }> {
   await ensureSeedAdminUser();
   const normalizedEmail = input.email.toLowerCase();
   const existing = await prisma.user.findUnique({ where: { email: normalizedEmail } });
@@ -126,5 +134,8 @@ export async function changeUserPassword(email: string, nextPassword: string): P
   await ensureSeedAdminUser();
   const target = await prisma.user.findUnique({ where: { email: email.toLowerCase() } });
   if (!target) throw new Error('Usuario no encontrado.');
-  await prisma.user.update({ where: { email: email.toLowerCase() }, data: { passwordHash: hashPassword(nextPassword), mustChangePassword: false } });
+  await prisma.user.update({
+    where: { email: email.toLowerCase() },
+    data: { passwordHash: hashPassword(nextPassword), mustChangePassword: false },
+  });
 }

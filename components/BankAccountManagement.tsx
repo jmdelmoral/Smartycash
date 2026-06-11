@@ -1,8 +1,9 @@
 'use client';
 
 import { useState } from 'react';
-import { Input } from '@/components/ui/input';
+
 import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
 import { BankAccount } from '@/types';
 
 interface BankAccountManagementProps {
@@ -11,7 +12,11 @@ interface BankAccountManagementProps {
   onDeleteAccount: (id: string) => void;
 }
 
-export function BankAccountManagement({ accounts, onAddAccount, onDeleteAccount }: BankAccountManagementProps) {
+export function BankAccountManagement({
+  accounts,
+  onAddAccount,
+  onDeleteAccount,
+}: BankAccountManagementProps) {
   const [bankName, setBankName] = useState('');
   const [accountNumber, setAccountNumber] = useState('');
   const [country, setCountry] = useState('Chile');
@@ -22,7 +27,9 @@ export function BankAccountManagement({ accounts, onAddAccount, onDeleteAccount 
       id: `ACC-${Date.now()}`,
       bankName,
       accountNumber,
-      country
+      country,
+      currency: 'CLP',
+      isActive: true,
     });
     setBankName('');
     setAccountNumber('');
@@ -35,15 +42,23 @@ export function BankAccountManagement({ accounts, onAddAccount, onDeleteAccount 
         <div className="grid grid-cols-1 gap-4 md:grid-cols-4 items-end">
           <div className="space-y-2">
             <label className="text-sm font-medium">Banco</label>
-            <Input value={bankName} onChange={(e) => setBankName(e.target.value)} placeholder="Ej: Banco Estado" />
+            <Input
+              value={bankName}
+              onChange={(e) => setBankName(e.target.value)}
+              placeholder="Ej: Banco Estado"
+            />
           </div>
           <div className="space-y-2">
             <label className="text-sm font-medium">N° de Cuenta</label>
-            <Input value={accountNumber} onChange={(e) => setAccountNumber(e.target.value)} placeholder="12345678" />
+            <Input
+              value={accountNumber}
+              onChange={(e) => setAccountNumber(e.target.value)}
+              placeholder="12345678"
+            />
           </div>
           <div className="space-y-2">
             <label className="text-sm font-medium">País</label>
-            <select 
+            <select
               className="h-10 w-full rounded-md border bg-white px-3 text-sm"
               value={country}
               onChange={(e) => setCountry(e.target.value)}
@@ -81,9 +96,9 @@ export function BankAccountManagement({ accounts, onAddAccount, onDeleteAccount 
                   <td className="px-4 py-3">{acc.accountNumber}</td>
                   <td className="px-4 py-3">{acc.country}</td>
                   <td className="px-4 py-3 text-right">
-                    <Button 
-                      variant="ghost" 
-                      size="sm" 
+                    <Button
+                      variant="ghost"
+                      size="sm"
                       className="text-red-600 hover:text-red-700"
                       onClick={() => onDeleteAccount(acc.id)}
                     >

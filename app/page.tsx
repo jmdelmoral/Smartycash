@@ -1,41 +1,55 @@
 'use client';
 
-import { useEffect, useMemo, useState } from 'react';
 import { signOut, useSession } from 'next-auth/react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import * as XLSX from 'xlsx';
 import { z } from 'zod';
 
+import { BankAccountManagement } from '@/components/BankAccountManagement';
+import { BankStatementManagement } from '@/components/BankStatementManagement';
+import { ClientManagement } from '@/components/ClientManagement';
+import { CobranzaManagement } from '@/components/CobranzaManagement';
+import { RecaudacionManagement } from '@/components/RecaudacionManagement';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
-import { BankStatementManagement } from '@/components/BankStatementManagement';
-import { BankAccountManagement } from '@/components/BankAccountManagement';
-import { ClientManagement } from '@/components/ClientManagement';
-import { RecaudacionManagement } from '@/components/RecaudacionManagement';
 import { UserManagement } from '@/components/UserManagement';
-import { BankAccount, CartolaMovement, CartolaDocument, Client, CollectionRequest, CobranzaMainDocument } from '@/types';
-import { CobranzaManagement } from '@/components/CobranzaManagement';
+import {
+  BankAccount,
+  CartolaMovement,
+  CartolaDocument,
+  Client,
+  CollectionRequest,
+  CobranzaMainDocument,
+} from '@/types';
 
 type UserRole =
   | 'Administrador'
   | 'Contabilidad'
-  | 'Recaudación'
-  | 'Conciliación medios de pago'
-  | 'Agente CC'
+  | 'Recaudacion'
+  | 'ConciliacionMediosDePago'
+  | 'AgenteCC'
   | 'Cobranza';
 
-type ApplicationTab = 'usuarios' | 'cuentas' | 'clientes' | 'cartola' | 'recaudacion' | 'contabilidad' | 'cobranza-credito';
+type ApplicationTab =
+  | 'usuarios'
+  | 'cuentas'
+  | 'clientes'
+  | 'cartola'
+  | 'recaudacion'
+  | 'contabilidad'
+  | 'cobranza-credito';
 
 const ROLE_ACCESS: Record<ApplicationTab, UserRole[]> = {
   usuarios: ['Administrador'],
   cuentas: ['Administrador'],
-  clientes: ['Administrador', 'Agente CC', 'Recaudación'],
-  cartola: ['Contabilidad', 'Recaudación', 'Conciliación medios de pago', 'Cobranza'],
-  recaudacion: ['Recaudación', 'Contabilidad'],
+  clientes: ['Administrador', 'AgenteCC', 'Recaudacion'],
+  cartola: ['Contabilidad', 'Recaudacion', 'ConciliacionMediosDePago', 'Cobranza'],
+  recaudacion: ['Recaudacion', 'Contabilidad'],
   contabilidad: ['Contabilidad'],
-  'cobranza-credito': ['Cobranza', 'Agente CC'],
+  'cobranza-credito': ['Cobranza', 'AgenteCC'],
 };
 
 const tabLabel: Record<ApplicationTab, string> = {
@@ -55,37 +69,43 @@ export default function HomePage() {
   const [newPassword, setNewPassword] = useState('');
   const [newPasswordConfirm, setNewPasswordConfirm] = useState('');
   const [passwordError, setPasswordError] = useState<string | null>(null);
-  
+  const [masterDataError, setMasterDataError] = useState<string | null>(null);
+  const businessDataLoadedRef = useRef(false);
+
   // Estado global de cuentas bancarias permitidas (Simulado)
-  const [bankAccounts, setBankAccounts] = useState<BankAccount[]>([
-    { id: 'ACC-1', bankName: 'Banco Estado', accountNumber: '12345678', country: 'Chile' },
+  const [bankAccounts, setBankAccounts] = useState<BankAccount[]>([]);
+  /*
     { id: 'ACC-2', bankName: 'BCP', accountNumber: '987654321', country: 'Perú' },
-  ]);
 
   // Lifting movements state to synchronize Cartola and Recaudación
+  */
   const [movements, setMovements] = useState<CartolaMovement[]>([]);
-  
+
   // Lifting Clients state
-  const [clients, setClients] = useState<Client[]>([
-    { id: 'CLI-1', name: 'Viajes Falabella', taxId: '77.123.456-K' },
+  const [clients, setClients] = useState<Client[]>([]);
+  /*
     { id: 'CLI-2', name: 'Turavion', taxId: '88.987.654-3' },
-  ]);
 
   // Lifting Collection Requests state
+  */
   const [requests, setRequests] = useState<CollectionRequest[]>([]);
 
   // Lifting Cobranza Documents state
   const [cobranzaDocs, setCobranzaDocs] = useState<CobranzaMainDocument[]>([]);
 
   const handleReconcileFromRecaudacion = (movementId: string, documents: CartolaDocument[]) => {
-    setMovements(prev => prev.map(m => 
-      m.movementId === movementId ? { 
-        ...m, 
-        documents, 
-        mainIdentification: 'GC',
-        mainIdentificationId: 'IDN-GC'
-      } : m
-    ));
+    setMovements((prev) =>
+      prev.map((m) =>
+        m.movementId === movementId
+          ? {
+              ...m,
+              documents,
+              mainIdentification: 'GC',
+              mainIdentificationId: 'IDN-GC',
+            }
+          : m
+      )
+    );
   };
 
   // Detectar si la autenticación está habilitada desde las variables de entorno
@@ -95,7 +115,12 @@ export default function HomePage() {
   const effectiveSession = useMemo(() => {
     if (!isAuthEnabled) {
       return {
-        user: { name: 'Admin Local', email: 'admin@local.test', role: 'Administrador' as UserRole, mustChangePassword: false },
+        user: {
+          name: 'Admin Local',
+          email: 'admin@local.test',
+          role: 'Administrador' as UserRole,
+          mustChangePassword: false,
+        },
       };
     }
     return session;
@@ -106,12 +131,179 @@ export default function HomePage() {
   const canAccessTab = (tab: ApplicationTab): boolean =>
     activeRole === 'Administrador' || ROLE_ACCESS[tab].includes(activeRole);
 
+  const activeBankAccounts = useMemo(
+    () => bankAccounts.filter((account) => account.isActive !== false),
+    [bankAccounts]
+  );
+
+  const activeClients = useMemo(
+    () => clients.filter((client) => client.isActive !== false),
+    [clients]
+  );
+
   useEffect(() => {
     const role = effectiveSession?.user?.role as UserRole | undefined;
     if (role) {
       setActiveRole(role);
     }
   }, [effectiveSession?.user?.role]);
+
+  useEffect(() => {
+    if (currentStatus !== 'authenticated' || !isAuthEnabled) return;
+
+    const loadMasterData = async () => {
+      setMasterDataError(null);
+      try {
+        const [
+          bankAccountsResponse,
+          clientsResponse,
+          movementsResponse,
+          requestsResponse,
+          cobranzaResponse,
+        ] = await Promise.all([
+          fetch('/api/bank-accounts'),
+          fetch('/api/clients'),
+          fetch('/api/cartola/movements'),
+          fetch('/api/recaudacion/requests'),
+          fetch('/api/cobranza/documents'),
+        ]);
+
+        if (
+          !bankAccountsResponse.ok ||
+          !clientsResponse.ok ||
+          !movementsResponse.ok ||
+          !requestsResponse.ok ||
+          !cobranzaResponse.ok
+        ) {
+          throw new Error('No fue posible cargar datos desde la base.');
+        }
+
+        const bankAccountsPayload = (await bankAccountsResponse.json()) as {
+          accounts: BankAccount[];
+        };
+        const clientsPayload = (await clientsResponse.json()) as { clients: Client[] };
+        const movementsPayload = (await movementsResponse.json()) as {
+          movements: CartolaMovement[];
+        };
+        const requestsPayload = (await requestsResponse.json()) as {
+          requests: CollectionRequest[];
+        };
+        const cobranzaPayload = (await cobranzaResponse.json()) as {
+          documents: CobranzaMainDocument[];
+        };
+
+        setBankAccounts(bankAccountsPayload.accounts);
+        setClients(clientsPayload.clients);
+        setMovements(movementsPayload.movements);
+        setRequests(requestsPayload.requests);
+        setCobranzaDocs(cobranzaPayload.documents);
+        businessDataLoadedRef.current = true;
+      } catch (error) {
+        setMasterDataError(
+          error instanceof Error ? error.message : 'No fue posible cargar datos maestros.'
+        );
+      }
+    };
+
+    loadMasterData();
+  }, [currentStatus, isAuthEnabled]);
+
+  const handleAddBankAccount = async (account: BankAccount) => {
+    const response = await fetch('/api/bank-accounts', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(account),
+    });
+    const payload = (await response.json()) as { account?: BankAccount; error?: string };
+    if (!response.ok || !payload.account) {
+      setMasterDataError(payload.error ?? 'No se pudo registrar la cuenta bancaria.');
+      return;
+    }
+    setBankAccounts((prev) => [payload.account!, ...prev]);
+  };
+
+  const handleDeactivateBankAccount = async (id: string) => {
+    const response = await fetch('/api/bank-accounts', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id, isActive: false }),
+    });
+    const payload = (await response.json()) as { account?: BankAccount; error?: string };
+    if (!response.ok || !payload.account) {
+      setMasterDataError(payload.error ?? 'No se pudo desactivar la cuenta bancaria.');
+      return;
+    }
+    setBankAccounts((prev) =>
+      prev.map((account) => (account.id === id ? payload.account! : account))
+    );
+  };
+
+  const handleAddClient = async (client: Client) => {
+    const response = await fetch('/api/clients', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(client),
+    });
+    const payload = (await response.json()) as { client?: Client; error?: string };
+    if (!response.ok || !payload.client) {
+      setMasterDataError(payload.error ?? 'No se pudo registrar el cliente.');
+      return;
+    }
+    setClients((prev) => [payload.client!, ...prev]);
+  };
+
+  const handleDeactivateClient = async (id: string) => {
+    const response = await fetch('/api/clients', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id, isActive: false }),
+    });
+    const payload = (await response.json()) as { client?: Client; error?: string };
+    if (!response.ok || !payload.client) {
+      setMasterDataError(payload.error ?? 'No se pudo desactivar el cliente.');
+      return;
+    }
+    setClients((prev) => prev.map((client) => (client.id === id ? payload.client! : client)));
+  };
+
+  useEffect(() => {
+    if (!businessDataLoadedRef.current || currentStatus !== 'authenticated') return;
+    const timeout = window.setTimeout(() => {
+      fetch('/api/cartola/movements', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ movements }),
+      }).catch(() => setMasterDataError('No fue posible sincronizar Cartola.'));
+    }, 600);
+
+    return () => window.clearTimeout(timeout);
+  }, [currentStatus, movements]);
+
+  useEffect(() => {
+    if (!businessDataLoadedRef.current || currentStatus !== 'authenticated') return;
+    const timeout = window.setTimeout(() => {
+      fetch('/api/recaudacion/requests', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ requests }),
+      }).catch(() => setMasterDataError('No fue posible sincronizar Recaudacion.'));
+    }, 600);
+
+    return () => window.clearTimeout(timeout);
+  }, [currentStatus, requests]);
+
+  useEffect(() => {
+    if (!businessDataLoadedRef.current || currentStatus !== 'authenticated') return;
+    const timeout = window.setTimeout(() => {
+      fetch('/api/cobranza/documents', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ documents: cobranzaDocs }),
+      }).catch(() => setMasterDataError('No fue posible sincronizar Cobranza.'));
+    }, 600);
+
+    return () => window.clearTimeout(timeout);
+  }, [cobranzaDocs, currentStatus]);
 
   const onChangeFirstPassword = async () => {
     setPasswordError(null);
@@ -146,7 +338,9 @@ export default function HomePage() {
       <main className="flex min-h-screen items-center justify-center p-6">
         <Card className="p-6">
           <p className="mb-3 text-sm">Debes iniciar sesión para entrar a SmartyCash.</p>
-          <Button onClick={() => (window.location.href = '/auth/signin')}>Ir a iniciar sesión</Button>
+          <Button onClick={() => (window.location.href = '/auth/signin')}>
+            Ir a iniciar sesión
+          </Button>
         </Card>
       </main>
     );
@@ -155,144 +349,149 @@ export default function HomePage() {
   const mustChangePassword = Boolean(effectiveSession.user?.mustChangePassword);
 
   return (
-        <main className="min-h-screen bg-slate-50 p-6 text-slate-900">
-            <div className="mx-auto flex w-full max-w-7xl flex-col gap-6">
-                <Card className="p-6">
-                    <div className="flex flex-wrap items-center justify-between gap-4">
-                        <div>
-                            <h1 className="text-3xl font-bold">SmartyCash</h1>
-                            <p className="text-sm text-slate-600">
-                                Gestión de cobranza y recaudación con control por roles y seguimiento de
-                                cartola.
-                            </p>
-                        </div>
-                        <div className="flex items-center gap-3">
-                            <div className="rounded-md border bg-white px-3 py-2 text-sm">
-                                <span className="font-medium">Perfil activo:</span> {effectiveSession.user?.name} (
-                                {activeRole})
-                            </div>
-                            <Button variant="outline" onClick={() => signOut({ callbackUrl: '/auth/signin' })}>
-                                Cerrar sesión
-                            </Button>
-                        </div>
-                    </div>
-                </Card>
-
-                {mustChangePassword ? (
-                    <Card className="p-6">
-                        <h2 className="mb-3 text-xl font-semibold">Cambio obligatorio de contraseña</h2>
-                        <p className="mb-4 text-sm text-slate-600">
-                            Debes cambiar tu contraseña temporal antes de usar el aplicativo.
-                        </p>
-                        <div className="flex max-w-xl flex-col gap-3">
-                            <Input
-                                type="password"
-                                placeholder="Nueva contraseña"
-                                value={newPassword}
-                                onChange={(event) => setNewPassword(event.target.value)}
-                            />
-                            <Input
-                                type="password"
-                                placeholder="Confirmar nueva contraseña"
-                                value={newPasswordConfirm}
-                                onChange={(event) => setNewPasswordConfirm(event.target.value)}
-                            />
-                            {passwordError ? <p className="text-sm text-red-600">{passwordError}</p> : null}
-                            <Button onClick={onChangeFirstPassword}>Actualizar contraseña</Button>
-                        </div>
-                    </Card>
-                ) : null}
-
-                <Card className="p-6">
-                    <Tabs
-                        value={activeTab ?? undefined}
-                        onValueChange={(nextTab) => setActiveTab((nextTab || null) as ApplicationTab | null)}
-                    >
-                        <TabsList className="mb-4 h-auto w-full flex-wrap justify-start gap-2 bg-transparent p-0">
-                            {(Object.keys(tabLabel) as ApplicationTab[]).map((tab) => (
-                                <TabsTrigger
-                                    key={tab}
-                                    value={tab}
-                                    disabled={!canAccessTab(tab) || mustChangePassword}
-                                    className="border data-[state=active]:border-slate-400"
-                                >
-                                    {tabLabel[tab]}
-                                </TabsTrigger>
-                            ))}
-                        </TabsList>
-
-                        <TabsContent value="usuarios" className="space-y-5">
-                            {!canAccessTab('usuarios') ? (
-                                <p className="rounded-md border border-amber-200 bg-amber-50 p-3 text-sm text-amber-700">
-                                    Solo Administrador puede gestionar usuarios.
-                                </p>
-                            ) : (
-                                <UserManagement />
-                            )}
-                        </TabsContent>
-
-                        <TabsContent value="cuentas">
-                            <BankAccountManagement 
-                                accounts={bankAccounts}
-                                onAddAccount={(acc) => setBankAccounts([...bankAccounts, acc])}
-                                onDeleteAccount={(id) => setBankAccounts(bankAccounts.filter(a => a.id !== id))}
-                            />
-                        </TabsContent>
-
-                        <TabsContent value="clientes">
-                            <ClientManagement 
-                                clients={clients}
-                                onAddClient={(c) => setClients([...clients, c])}
-                                onDeleteClient={(id) => setClients(clients.filter(c => c.id !== id))}
-                            />
-                        </TabsContent>
-
-                        <TabsContent value="cartola" className="space-y-5">
-                            {!canAccessTab('cartola') ? (
-                                <p className="rounded-md border border-amber-200 bg-amber-50 p-3 text-sm text-amber-700">
-                                    Tu perfil no tiene acceso a Cartola.
-                                </p>
-                            ) : (
-                                <BankStatementManagement 
-                                    availableAccounts={bankAccounts} 
-                                    movements={movements}
-                                    setMovements={setMovements}
-                                />
-                            )}
-                        </TabsContent>
-
-                        <TabsContent value="recaudacion">
-                            <RecaudacionManagement 
-                                userRole={activeRole}
-                                bankAccounts={bankAccounts}
-                                clients={clients}
-                                movements={movements}
-                                requests={requests}
-                                setRequests={setRequests}
-                                onReconcile={handleReconcileFromRecaudacion}
-                            />
-                        </TabsContent>
-
-                        <TabsContent value="contabilidad">
-                            <Card className="p-4 text-sm text-slate-700">
-                                Módulo de Contabilidad listo para conciliaciones y análisis financiero.
-                            </Card>
-                        </TabsContent>
-
-                        <TabsContent value="cobranza-credito">
-                            <CobranzaManagement
-                                userRole={activeRole}
-                                clients={clients}
-                                movements={movements}
-                                setMovements={setMovements} // <--- Esta es la línea que faltaba
-                                cobranzaDocs={cobranzaDocs}
-                                setCobranzaDocs={setCobranzaDocs}
-                            />
-                        </TabsContent>
-
-                    </Tabs>
-                </Card>
+    <main className="min-h-screen bg-slate-50 p-6 text-slate-900">
+      <div className="mx-auto flex w-full max-w-7xl flex-col gap-6">
+        <Card className="p-6">
+          <div className="flex flex-wrap items-center justify-between gap-4">
+            <div>
+              <h1 className="text-3xl font-bold">SmartyCash</h1>
+              <p className="text-sm text-slate-600">
+                Gestión de cobranza y recaudación con control por roles y seguimiento de cartola.
+              </p>
             </div>
-        </main>
-    );
+            <div className="flex items-center gap-3">
+              <div className="rounded-md border bg-white px-3 py-2 text-sm">
+                <span className="font-medium">Perfil activo:</span> {effectiveSession.user?.name} (
+                {activeRole})
+              </div>
+              <Button variant="outline" onClick={() => signOut({ callbackUrl: '/auth/signin' })}>
+                Cerrar sesión
+              </Button>
+            </div>
+          </div>
+        </Card>
+
+        {mustChangePassword ? (
+          <Card className="p-6">
+            <h2 className="mb-3 text-xl font-semibold">Cambio obligatorio de contraseña</h2>
+            <p className="mb-4 text-sm text-slate-600">
+              Debes cambiar tu contraseña temporal antes de usar el aplicativo.
+            </p>
+            <div className="flex max-w-xl flex-col gap-3">
+              <Input
+                type="password"
+                placeholder="Nueva contraseña"
+                value={newPassword}
+                onChange={(event) => setNewPassword(event.target.value)}
+              />
+              <Input
+                type="password"
+                placeholder="Confirmar nueva contraseña"
+                value={newPasswordConfirm}
+                onChange={(event) => setNewPasswordConfirm(event.target.value)}
+              />
+              {passwordError ? <p className="text-sm text-red-600">{passwordError}</p> : null}
+              <Button onClick={onChangeFirstPassword}>Actualizar contraseña</Button>
+            </div>
+          </Card>
+        ) : null}
+
+        {masterDataError ? (
+          <Card className="border-red-200 bg-red-50 p-4 text-sm text-red-700">
+            {masterDataError}
+          </Card>
+        ) : null}
+
+        <Card className="p-6">
+          <Tabs
+            value={activeTab ?? undefined}
+            onValueChange={(nextTab) => setActiveTab((nextTab || null) as ApplicationTab | null)}
+          >
+            <TabsList className="mb-4 h-auto w-full flex-wrap justify-start gap-2 bg-transparent p-0">
+              {(Object.keys(tabLabel) as ApplicationTab[]).map((tab) => (
+                <TabsTrigger
+                  key={tab}
+                  value={tab}
+                  disabled={!canAccessTab(tab) || mustChangePassword}
+                  className="border data-[state=active]:border-slate-400"
+                >
+                  {tabLabel[tab]}
+                </TabsTrigger>
+              ))}
+            </TabsList>
+
+            <TabsContent value="usuarios" className="space-y-5">
+              {!canAccessTab('usuarios') ? (
+                <p className="rounded-md border border-amber-200 bg-amber-50 p-3 text-sm text-amber-700">
+                  Solo Administrador puede gestionar usuarios.
+                </p>
+              ) : (
+                <UserManagement />
+              )}
+            </TabsContent>
+
+            <TabsContent value="cuentas">
+              <BankAccountManagement
+                accounts={bankAccounts}
+                onAddAccount={handleAddBankAccount}
+                onDeleteAccount={handleDeactivateBankAccount}
+              />
+            </TabsContent>
+
+            <TabsContent value="clientes">
+              <ClientManagement
+                clients={clients}
+                onAddClient={handleAddClient}
+                onDeleteClient={handleDeactivateClient}
+              />
+            </TabsContent>
+
+            <TabsContent value="cartola" className="space-y-5">
+              {!canAccessTab('cartola') ? (
+                <p className="rounded-md border border-amber-200 bg-amber-50 p-3 text-sm text-amber-700">
+                  Tu perfil no tiene acceso a Cartola.
+                </p>
+              ) : (
+                <BankStatementManagement
+                  availableAccounts={activeBankAccounts}
+                  movements={movements}
+                  setMovements={setMovements}
+                />
+              )}
+            </TabsContent>
+
+            <TabsContent value="recaudacion">
+              <RecaudacionManagement
+                userRole={activeRole}
+                bankAccounts={activeBankAccounts}
+                clients={activeClients}
+                movements={movements}
+                setMovements={setMovements}
+                requests={requests}
+                setRequests={setRequests}
+                onReconcile={handleReconcileFromRecaudacion}
+              />
+            </TabsContent>
+
+            <TabsContent value="contabilidad">
+              <Card className="p-4 text-sm text-slate-700">
+                Módulo de Contabilidad listo para conciliaciones y análisis financiero.
+              </Card>
+            </TabsContent>
+
+            <TabsContent value="cobranza-credito">
+              <CobranzaManagement
+                userRole={activeRole}
+                clients={activeClients}
+                movements={movements}
+                setMovements={setMovements} // <--- Esta es la línea que faltaba
+                cobranzaDocs={cobranzaDocs}
+                setCobranzaDocs={setCobranzaDocs}
+              />
+            </TabsContent>
+          </Tabs>
+        </Card>
+      </div>
+    </main>
+  );
 }

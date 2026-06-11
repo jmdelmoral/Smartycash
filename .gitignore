@@ -40,6 +40,10 @@ yarn-error.log*
 *.tsbuildinfo
 next-env.d.ts
 
+# prisma generated temporary files and local duplicate migration draft
+lib/generated/prisma/*.tmp*
+prisma/migrations/20260609121000_add_business_traceability_tables/
+
 #files used for deployment
 params-dev.json
 params-prod.json

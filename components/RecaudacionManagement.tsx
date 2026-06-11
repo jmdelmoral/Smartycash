@@ -2,12 +2,28 @@
 
 import { useMemo, useState } from 'react';
 import * as XLSX from 'xlsx';
+
+import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogDescription,
+  DialogFooter,
+} from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
-import { Badge } from '@/components/ui/badge';
-import { BankAccount, CartolaMovement, CollectionRequest, Client, CartolaDocument, UserRole, MainIdentificationType } from '@/types'; // Assuming these exist or need to be created
-import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from '@/components/ui/dialog';
+import {
+  BankAccount,
+  CartolaMovement,
+  CollectionRequest,
+  Client,
+  CartolaDocument,
+  UserRole,
+  MainIdentificationType,
+} from '@/types'; // Assuming these exist or need to be created
 
 interface RecaudacionManagementProps {
   userRole: UserRole;
@@ -16,11 +32,20 @@ interface RecaudacionManagementProps {
   movements: CartolaMovement[];
   setMovements: React.Dispatch<React.SetStateAction<CartolaMovement[]>>;
   requests: CollectionRequest[];
-  setRequests: (reqs: CollectionRequest[]) => void;
+  setRequests: React.Dispatch<React.SetStateAction<CollectionRequest[]>>;
   onReconcile: (movementId: string, documents: CartolaDocument[]) => void;
 }
 
-export function RecaudacionManagement({ userRole, bankAccounts, clients, movements, setMovements, requests, setRequests, onReconcile }: RecaudacionManagementProps) {
+export function RecaudacionManagement({
+  userRole,
+  bankAccounts,
+  clients,
+  movements,
+  setMovements,
+  requests,
+  setRequests,
+  onReconcile,
+}: RecaudacionManagementProps) {
   const [manualMatchMovId, setManualMatchMovId] = useState<Record<string, string>>({});
   const [selectedAccId, setSelectedAccId] = useState('');
   const [transferDate, setTransferDate] = useState('');
@@ -37,13 +62,15 @@ export function RecaudacionManagement({ userRole, bankAccounts, clients, movemen
   const [viewingPnrs, setViewingPnrs] = useState<CartolaDocument[]>([]);
   const [isPnrsModalOpen, setIsPnrsModalOpen] = useState(false);
   const [isUploadSupportModalOpen, setIsUploadSupportModalOpen] = useState(false);
-  const [currentRequestToUploadSupport, setCurrentRequestToUploadSupport] = useState<CollectionRequest | null>(null);
+  const [currentRequestToUploadSupport, setCurrentRequestToUploadSupport] =
+    useState<CollectionRequest | null>(null);
   const [newSupportFileForRequest, setNewSupportFileForRequest] = useState<File | null>(null);
 
-  const isAgente = userRole === 'Agente CC' || userRole === 'Administrador';
-  const isRecaudacion = userRole === 'Recaudación' || userRole === 'Administrador';
+  const isAgente = userRole === 'AgenteCC' || userRole === 'Administrador';
+  const isRecaudacion = userRole === 'Recaudacion' || userRole === 'Administrador';
 
-  const generateRequestId = () => `REQ-${Date.now()}-${Math.random().toString(36).slice(2, 5).toUpperCase()}`;
+  const generateRequestId = () =>
+    `REQ-${Date.now()}-${Math.random().toString(36).slice(2, 5).toUpperCase()}`;
 
   const onAddPnr = () => {
     // Validación alfanumérica de 6 caracteres
@@ -57,12 +84,15 @@ export function RecaudacionManagement({ userRole, bankAccounts, clients, movemen
       return;
     }
 
-    if (tempDocs.some(d => d.reference.toUpperCase() === pnrRef.toUpperCase())) {
+    if (tempDocs.some((d) => d.reference.toUpperCase() === pnrRef.toUpperCase())) {
       setError('Este PNR ya ha sido agregado a esta solicitud.');
       return;
     }
 
-    setTempDocs([...tempDocs, { id: `PNR-${Date.now()}`, reference: pnrRef, amount: amt, detail: 'Carga Agente CC' }]);
+    setTempDocs([
+      ...tempDocs,
+      { id: `PNR-${Date.now()}`, reference: pnrRef, amount: amt, detail: 'Carga Agente CC' },
+    ]);
     setPnrRef('');
     setPnrAmount('');
     setError(null);
@@ -94,7 +124,7 @@ export function RecaudacionManagement({ userRole, bankAccounts, clients, movemen
 
       // Estructura esperada: Cuenta, Fecha, ClienteID, PNR, MontoPNR, MontoTotal
       const newRequests: CollectionRequest[] = [];
-      
+
       // Agrupamos por una "llave" única de solicitud en el Excel
       const groups = rows.reduce((acc: any, row: any) => {
         const key = `${row.Cuenta}-${row.Fecha}-${row.MontoTotal}-${row.ClienteID}`;
@@ -106,44 +136,58 @@ export function RecaudacionManagement({ userRole, bankAccounts, clients, movemen
       for (const key in groups) {
         const groupRows = groups[key];
         const first = groupRows[0];
-        
+
         // --- Validaciones de formato y existencia ---
         const totalAmount = Number(first.MontoTotal);
-        if (isNaN(totalAmount) || totalAmount <= 0) throw new Error(`MontoTotal inválido en solicitud ${key}.`);
+        if (isNaN(totalAmount) || totalAmount <= 0)
+          throw new Error(`MontoTotal inválido en solicitud ${key}.`);
 
         const pnrSum = groupRows.reduce((s: number, r: any) => s + Number(r.MontoPNR), 0);
         if (Math.round(totalAmount) !== Math.round(pnrSum)) {
-          throw new Error(`Falla de cuadratura en solicitud con PNR ${first.PNR}: Total $${totalAmount} vs Detalle $${pnrSum}`);
+          throw new Error(
+            `Falla de cuadratura en solicitud con PNR ${first.PNR}: Total $${totalAmount} vs Detalle $${pnrSum}`
+          );
         }
-        
-        const account = bankAccounts.find(a => a.accountNumber === String(first.Cuenta));
-        if (!account) throw new Error(`La cuenta ${first.Cuenta} no está registrada en el sistema.`);
 
-        const client = clients.find(c => c.id === String(first.ClienteID));
+        const account = bankAccounts.find((a) => a.accountNumber === String(first.Cuenta));
+        if (!account)
+          throw new Error(`La cuenta ${first.Cuenta} no está registrada en el sistema.`);
+
+        const client = clients.find((c) => c.id === String(first.ClienteID));
         if (!client) throw new Error(`ClienteID ${first.ClienteID} no registrado.`);
 
         // Fecha: Validar formato YYYY-MM-DD
-        if (!/^\d{4}-\d{2}-\d{2}$/.test(String(first.Fecha))) throw new Error(`Formato de fecha inválido (esperado YYYY-MM-DD) en solicitud ${key}.`);
+        if (!/^\d{4}-\d{2}-\d{2}$/.test(String(first.Fecha)))
+          throw new Error(`Formato de fecha inválido (esperado YYYY-MM-DD) en solicitud ${key}.`);
 
         const docs: CartolaDocument[] = groupRows.map((r: any) => {
           const pnr = String(r.PNR).toUpperCase();
-          if (pnr.length !== 6 || !/^[a-zA-Z0-9]+$/.test(pnr)) throw new Error(`PNR inválido (${pnr}) en solicitud ${key}.`);
+          if (pnr.length !== 6 || !/^[a-zA-Z0-9]+$/.test(pnr))
+            throw new Error(`PNR inválido (${pnr}) en solicitud ${key}.`);
           const pnrAmt = Number(r.MontoPNR);
-          if (isNaN(pnrAmt) || pnrAmt <= 0) throw new Error(`MontoPNR inválido para PNR ${pnr} en solicitud ${key}.`);
+          if (isNaN(pnrAmt) || pnrAmt <= 0)
+            throw new Error(`MontoPNR inválido para PNR ${pnr} en solicitud ${key}.`);
 
-          return { id: `PNR-${Math.random()}`, reference: pnr, amount: pnrAmt, detail: 'Carga Masiva Agente' };
+          return {
+            id: `PNR-${Math.random()}`,
+            reference: pnr,
+            amount: pnrAmt,
+            detail: 'Carga Masiva Agente',
+          };
         });
         // --- Fin Validaciones ---
 
         const [year, month, day] = String(first.Fecha).split('-');
         const reversedDate = `${day}-${month}-${year}`;
 
-        const matchingMov = movements.find(m => 
-          m.bankAccount.toString().replace(/\D/g, '') === String(first.Cuenta).replace(/\D/g, '') &&
-          Math.round(m.amount) === Math.round(totalAmount) && 
-          m.mainIdentification === 'Sin identificar' &&
-          (m.date.includes(String(first.Fecha)) || m.date.includes(reversedDate)) &&
-          m.bank.toLowerCase().includes(account.bankName.toLowerCase())
+        const matchingMov = movements.find(
+          (m) =>
+            m.bankAccount.toString().replace(/\D/g, '') ===
+              String(first.Cuenta).replace(/\D/g, '') &&
+            Math.round(m.amount) === Math.round(totalAmount) &&
+            m.mainIdentification === 'Sin identificar' &&
+            (m.date.includes(String(first.Fecha)) || m.date.includes(reversedDate)) &&
+            m.bank.toLowerCase().includes(account.bankName.toLowerCase())
         );
 
         newRequests.push({
@@ -155,7 +199,7 @@ export function RecaudacionManagement({ userRole, bankAccounts, clients, movemen
           supportFileName: 'archivo_masivo.zip', // Placeholder, will be updated later
           status: matchingMov ? 'Preaprobado' : 'Pendiente',
           associatedMovementId: matchingMov?.movementId,
-          documents: docs
+          documents: docs,
         });
 
         if (matchingMov) onReconcile(matchingMov.movementId, docs);
@@ -191,11 +235,13 @@ export function RecaudacionManagement({ userRole, bankAccounts, clients, movemen
 
     const docsSum = tempDocs.reduce((sum, d) => sum + d.amount, 0);
     if (Math.round(total) !== Math.round(docsSum)) {
-      setError(`El monto total ($${total.toLocaleString()}) no coincide con la suma de los PNRs ($${docsSum.toLocaleString()}).`);
+      setError(
+        `El monto total ($${total.toLocaleString()}) no coincide con la suma de los PNRs ($${docsSum.toLocaleString()}).`
+      );
       return;
     }
 
-    const account = bankAccounts.find(a => a.id === selectedAccId);
+    const account = bankAccounts.find((a) => a.id === selectedAccId);
     if (!account) {
       setError('La cuenta seleccionada no es válida.');
       return;
@@ -206,22 +252,19 @@ export function RecaudacionManagement({ userRole, bankAccounts, clients, movemen
     const [year, month, day] = transferDate.split('-');
     const reversedDate = `${day}-${month}-${year}`; // Formato DD-MM-YYYY común en cartolas
 
-    const matchingMovement = movements.find(m => 
-      // 1. Comparación de Cuenta (solo dígitos)
-      m.bankAccount.toString().replace(/\D/g, '') === account.accountNumber.replace(/\D/g, '') &&
-      
-      // 2. Comparación de Monto (redondeado para evitar problemas de decimales)
-      Math.round(m.amount) === Math.round(total) &&
-      
-      // 3. Solo movimientos no identificados
-      m.mainIdentification === 'Sin identificar' &&
-
-      // 4. Comparación de Fecha Flexible
-      // Valida si la fecha de la cartola contiene YYYY-MM-DD o coincide con DD-MM-YYYY
-      (m.date.includes(transferDate) || m.date.includes(reversedDate)) &&
-      
-      // 5. El banco debe coincidir (búsqueda parcial)
-      m.bank.toLowerCase().includes(account.bankName.toLowerCase())
+    const matchingMovement = movements.find(
+      (m) =>
+        // 1. Comparación de Cuenta (solo dígitos)
+        m.bankAccount.toString().replace(/\D/g, '') === account.accountNumber.replace(/\D/g, '') &&
+        // 2. Comparación de Monto (redondeado para evitar problemas de decimales)
+        Math.round(m.amount) === Math.round(total) &&
+        // 3. Solo movimientos no identificados
+        m.mainIdentification === 'Sin identificar' &&
+        // 4. Comparación de Fecha Flexible
+        // Valida si la fecha de la cartola contiene YYYY-MM-DD o coincide con DD-MM-YYYY
+        (m.date.includes(transferDate) || m.date.includes(reversedDate)) &&
+        // 5. El banco debe coincidir (búsqueda parcial)
+        m.bank.toLowerCase().includes(account.bankName.toLowerCase())
     );
 
     const newRequest: CollectionRequest = {
@@ -233,7 +276,7 @@ export function RecaudacionManagement({ userRole, bankAccounts, clients, movemen
       supportFileName: supportFile.name,
       status: matchingMovement ? 'Preaprobado' : 'Pendiente',
       associatedMovementId: matchingMovement?.movementId,
-      documents: tempDocs
+      documents: tempDocs,
     };
 
     if (matchingMovement) {
@@ -241,7 +284,7 @@ export function RecaudacionManagement({ userRole, bankAccounts, clients, movemen
     }
 
     if (editingRequestId) {
-      setRequests(requests.map(req => req.id === editingRequestId ? newRequest : req));
+      setRequests(requests.map((req) => (req.id === editingRequestId ? newRequest : req)));
       setEditingRequestId(null);
       alert('Solicitud actualizada correctamente.');
     } else {
@@ -267,7 +310,7 @@ export function RecaudacionManagement({ userRole, bankAccounts, clients, movemen
     setSelectedClientId(req.clientId);
     setTempDocs(req.documents);
     // supportFile cannot be pre-filled for security reasons, user must re-upload if needed
-    setSupportFile(null); 
+    setSupportFile(null);
     setError(null);
   };
 
@@ -283,35 +326,55 @@ export function RecaudacionManagement({ userRole, bankAccounts, clients, movemen
   };
 
   const onProcessAction = (reqId: string, action: 'Aprobar' | 'Rechazar') => {
-    const req = requests.find(r => r.id === reqId);
+    const req = requests.find((r) => r.id === reqId);
     if (!req) return;
 
     if (action === 'Rechazar') {
-      const comment = prompt("Ingrese el motivo del rechazo:");
+      const comment = prompt('Ingrese el motivo del rechazo:');
       if (!comment) return;
 
       const targetMovId = req.associatedMovementId || manualMatchMovId[reqId];
-      if (targetMovId && (req.status === 'Preaprobado' || req.status === 'Pendiente')) { // Revertir si estaba preaprobado o si se había vinculado manualmente y no se ha aprobado
-        setMovements(prev => prev.map(m => 
-          m.movementId === targetMovId ? {
-            ...m,
-            documents: [],
-            mainIdentification: 'Sin identificar' as MainIdentificationType,
-            mainIdentificationId: 'IDN-SIN-ID'
-          } : m
-        ));
+      if (targetMovId && (req.status === 'Preaprobado' || req.status === 'Pendiente')) {
+        // Revertir si estaba preaprobado o si se había vinculado manualmente y no se ha aprobado
+        setMovements((prev) =>
+          prev.map((m) =>
+            m.movementId === targetMovId
+              ? {
+                  ...m,
+                  documents: [],
+                  mainIdentification: 'Sin identificar' as MainIdentificationType,
+                  mainIdentificationId: 'IDN-SIN-ID',
+                }
+              : m
+          )
+        );
       }
 
-      setRequests(requests.map(r => r.id === reqId ? { ...r, status: 'Rechazado', rejectionComment: comment } : r));
-      alert('Solicitud rechazada y movimiento de cartola liberado (si estaba asociado automáticamente).');
-    } else { // Aprobar
+      setRequests(
+        requests.map((r) =>
+          r.id === reqId ? { ...r, status: 'Rechazado', rejectionComment: comment } : r
+        )
+      );
+      alert(
+        'Solicitud rechazada y movimiento de cartola liberado (si estaba asociado automáticamente).'
+      );
+    } else {
+      // Aprobar
       if (req.status === 'Pendiente') {
         const selectedId = manualMatchMovId[reqId];
-        if (!selectedId) { alert("Debe vincular un movimiento de cartola para aprobar."); return; }
+        if (!selectedId) {
+          alert('Debe vincular un movimiento de cartola para aprobar.');
+          return;
+        }
         onReconcile(selectedId, req.documents);
-        setRequests(requests.map(r => r.id === reqId ? { ...r, status: 'Aprobado', associatedMovementId: selectedId } : r));
-      } else { // Preaprobado, solo confirmar
-        setRequests(requests.map(r => r.id === req.id ? { ...r, status: 'Aprobado' } : r));
+        setRequests(
+          requests.map((r) =>
+            r.id === reqId ? { ...r, status: 'Aprobado', associatedMovementId: selectedId } : r
+          )
+        );
+      } else {
+        // Preaprobado, solo confirmar
+        setRequests(requests.map((r) => (r.id === req.id ? { ...r, status: 'Aprobado' } : r)));
       }
       alert('Solicitud aprobada correctamente.');
     }
@@ -328,12 +391,16 @@ export function RecaudacionManagement({ userRole, bankAccounts, clients, movemen
 
   const onConfirmUploadSupport = () => {
     if (currentRequestToUploadSupport && newSupportFileForRequest) {
-      setRequests(prev => prev.map(req => 
-        req.id === currentRequestToUploadSupport.id 
-          ? { ...req, supportFileName: newSupportFileForRequest.name } 
-          : req
-      ));
-      alert(`Soporte "${newSupportFileForRequest.name}" adjuntado a la solicitud ${currentRequestToUploadSupport.id}.`);
+      setRequests((prev) =>
+        prev.map((req) =>
+          req.id === currentRequestToUploadSupport.id
+            ? { ...req, supportFileName: newSupportFileForRequest.name }
+            : req
+        )
+      );
+      alert(
+        `Soporte "${newSupportFileForRequest.name}" adjuntado a la solicitud ${currentRequestToUploadSupport.id}.`
+      );
       setIsUploadSupportModalOpen(false);
       setNewSupportFileForRequest(null);
       setCurrentRequestToUploadSupport(null);
@@ -343,14 +410,16 @@ export function RecaudacionManagement({ userRole, bankAccounts, clients, movemen
   };
 
   const onDownloadSupportFile = (fileName: string) => {
-    alert(`Simulando descarga del archivo: ${fileName}. En un sistema real, esto iniciaría la descarga.`);
+    alert(
+      `Simulando descarga del archivo: ${fileName}. En un sistema real, esto iniciaría la descarga.`
+    );
     // Implement actual download logic here if files were stored on a server
   };
 
   const onExportRequests = () => {
-    const data = requests.map(r => {
-      const acc = bankAccounts.find(a => a.id === r.bankAccountId);
-      const cli = clients.find(c => c.id === r.clientId);
+    const data = requests.map((r) => {
+      const acc = bankAccounts.find((a) => a.id === r.bankAccountId);
+      const cli = clients.find((c) => c.id === r.clientId);
       return {
         ID: r.id,
         Banco: acc?.bankName || 'N/A',
@@ -359,15 +428,15 @@ export function RecaudacionManagement({ userRole, bankAccounts, clients, movemen
         Monto_Total: r.amount,
         Cliente: cli?.name || 'N/A',
         Cant_PNRs: r.documents.length,
-        PNRs: r.documents.map(d => d.reference).join(', '),
+        PNRs: r.documents.map((d) => d.reference).join(', '),
         Estado: r.status,
         Motivo_Rechazo: r.rejectionComment || '',
-        ID_Movimiento_Cartola: r.associatedMovementId || ''
+        ID_Movimiento_Cartola: r.associatedMovementId || '',
       };
     });
     const ws = XLSX.utils.json_to_sheet(data);
     const wb = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb, ws, "Solicitudes");
+    XLSX.utils.book_append_sheet(wb, ws, 'Solicitudes');
     XLSX.writeFile(wb, `reporte_recaudacion_${new Date().toISOString().split('T')[0]}.xlsx`);
   };
 
@@ -376,42 +445,72 @@ export function RecaudacionManagement({ userRole, bankAccounts, clients, movemen
       {isAgente && (
         <Card className="p-4">
           <div className="flex justify-between items-center mb-4">
-            <h3 className="text-lg font-semibold">{editingRequestId ? 'Editar Solicitud' : 'Nueva Solicitud de Validación'} (Agente CC)</h3>
+            <h3 className="text-lg font-semibold">
+              {editingRequestId ? 'Editar Solicitud' : 'Nueva Solicitud de Validación'} (Agente CC)
+            </h3>
             <div className="flex gap-2">
-              <Button variant="outline" onClick={onDownloadMassUploadTemplate}>Descargar Plantilla</Button>
+              <Button variant="outline" onClick={onDownloadMassUploadTemplate}>
+                Descargar Plantilla
+              </Button>
               <label className="flex items-center justify-center px-3 py-1.5 bg-slate-100 rounded-md cursor-pointer hover:bg-slate-200 transition-colors text-sm font-medium border border-slate-200">
-                Carga Masiva <input type="file" className="hidden" onChange={onMassUploadRequests} />
+                Carga Masiva{' '}
+                <input type="file" className="hidden" onChange={onMassUploadRequests} />
               </label>
             </div>
           </div>
           <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-4">
             <div className="space-y-1">
               <label className="text-xs font-medium">Cuenta Bancaria</label>
-              <select className="w-full h-10 rounded-md border px-3 text-sm" value={selectedAccId} onChange={(e) => setSelectedAccId(e.target.value)}>
+              <select
+                className="w-full h-10 rounded-md border px-3 text-sm"
+                value={selectedAccId}
+                onChange={(e) => setSelectedAccId(e.target.value)}
+              >
                 <option value="">Seleccione cuenta...</option>
-                {bankAccounts.map(a => <option key={a.id} value={a.id}>{a.bankName} - {a.accountNumber}</option>)}
+                {bankAccounts.map((a) => (
+                  <option key={a.id} value={a.id}>
+                    {a.bankName} - {a.accountNumber}
+                  </option>
+                ))}
               </select>
             </div>
             <div className="space-y-1">
               <label className="text-xs font-medium">Fecha Transferencia</label>
-              <Input type="date" value={transferDate} onChange={(e) => setTransferDate(e.target.value)} />
+              <Input
+                type="date"
+                value={transferDate}
+                onChange={(e) => setTransferDate(e.target.value)}
+              />
             </div>
             <div className="space-y-1">
               <label className="text-xs font-medium">Monto Total</label>
-              <Input type="number" value={totalAmount} onChange={(e) => setTotalAmount(e.target.value)} placeholder="100000" />
+              <Input
+                type="number"
+                value={totalAmount}
+                onChange={(e) => setTotalAmount(e.target.value)}
+                placeholder="100000"
+              />
             </div>
             <div className="space-y-1">
               <label className="text-xs font-medium">Cliente</label>
-              <select className="w-full h-10 rounded-md border px-3 text-sm" value={selectedClientId} onChange={(e) => setSelectedClientId(e.target.value)}>
+              <select
+                className="w-full h-10 rounded-md border px-3 text-sm"
+                value={selectedClientId}
+                onChange={(e) => setSelectedClientId(e.target.value)}
+              >
                 <option value="">Buscar cliente...</option>
-                {clients.map(c => <option key={c.id} value={c.id}>{c.name} ({c.taxId})</option>)}
+                {clients.map((c) => (
+                  <option key={c.id} value={c.id}>
+                    {c.name} ({c.taxId})
+                  </option>
+                ))}
               </select>
             </div>
             <div className="space-y-1">
               <label className="text-xs font-medium">Soporte (PDF/JPG)</label>
-              <Input 
-                type="file" 
-                className="cursor-pointer" 
+              <Input
+                type="file"
+                className="cursor-pointer"
                 onChange={(e) => setSupportFile(e.target.files?.[0] || null)}
               />
             </div>
@@ -420,28 +519,47 @@ export function RecaudacionManagement({ userRole, bankAccounts, clients, movemen
           <div className="border-t pt-4">
             <h4 className="text-sm font-medium mb-2">Detalle de PNRs</h4>
             <div className="flex gap-2 mb-3">
-              <Input placeholder="PNR (6 caracteres)" value={pnrRef} onChange={(e) => setPnrRef(e.target.value)} maxLength={6} />
-              <Input type="number" placeholder="Monto PNR" value={pnrAmount} onChange={(e) => setPnrAmount(e.target.value)} />
-              <Button variant="outline" onClick={onAddPnr}>Añadir</Button>
+              <Input
+                placeholder="PNR (6 caracteres)"
+                value={pnrRef}
+                onChange={(e) => setPnrRef(e.target.value)}
+                maxLength={6}
+              />
+              <Input
+                type="number"
+                placeholder="Monto PNR"
+                value={pnrAmount}
+                onChange={(e) => setPnrAmount(e.target.value)}
+              />
+              <Button variant="outline" onClick={onAddPnr}>
+                Añadir
+              </Button>
             </div>
             <div className="flex flex-wrap gap-2">
               {tempDocs.map((d, i) => (
                 <Badge key={i} variant="secondary" className="py-1">
-                  {d.reference}: ${d.amount.toLocaleString()} 
-                  <button className="ml-2 text-red-500" onClick={() => setTempDocs(tempDocs.filter((_, idx) => idx !== i))}>x</button>
+                  {d.reference}: ${d.amount.toLocaleString()}
+                  <button
+                    className="ml-2 text-red-500"
+                    onClick={() => setTempDocs(tempDocs.filter((_, idx) => idx !== i))}
+                  >
+                    x
+                  </button>
                 </Badge>
               ))}
             </div>
           </div>
 
           {error && <p className="text-xs text-red-600 mt-2">{error}</p>}
-          
+
           <div className="flex gap-3 mt-4">
             <Button className="flex-1 bg-jetsmart-blue" onClick={onSubmitRequest}>
               {editingRequestId ? 'Actualizar Solicitud' : 'Enviar Solicitud'}
             </Button>
             {editingRequestId && (
-              <Button variant="outline" onClick={onCancelEdit}>Cancelar Edición</Button>
+              <Button variant="outline" onClick={onCancelEdit}>
+                Cancelar Edición
+              </Button>
             )}
           </div>
         </Card>
@@ -450,7 +568,12 @@ export function RecaudacionManagement({ userRole, bankAccounts, clients, movemen
       <Card className="p-4">
         <div className="flex justify-between items-center mb-4">
           <h3 className="text-lg font-semibold">Panel de Gestión de Recaudación</h3>
-          <Button variant="outline" size="sm" onClick={onExportRequests} disabled={requests.length === 0}>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={onExportRequests}
+            disabled={requests.length === 0}
+          >
             Exportar Listado Actual
           </Button>
         </div>
@@ -469,71 +592,128 @@ export function RecaudacionManagement({ userRole, bankAccounts, clients, movemen
             </thead>
             <tbody>
               {requests.length === 0 ? (
-                <tr><td colSpan={7} className="text-center py-4 text-slate-400">No hay solicitudes pendientes.</td></tr>
+                <tr>
+                  <td colSpan={7} className="text-center py-4 text-slate-400">
+                    No hay solicitudes pendientes.
+                  </td>
+                </tr>
               ) : (
-                requests.map(r => {
-                  const associatedAccount = bankAccounts.find(acc => acc.id === r.bankAccountId);
-                  const associatedClient = clients.find(c => c.id === r.clientId);
-                  const associatedMovement = r.associatedMovementId ? movements.find(m => m.movementId === r.associatedMovementId) : null;
+                requests.map((r) => {
+                  const associatedAccount = bankAccounts.find((acc) => acc.id === r.bankAccountId);
+                  const associatedClient = clients.find((c) => c.id === r.clientId);
+                  const associatedMovement = r.associatedMovementId
+                    ? movements.find((m) => m.movementId === r.associatedMovementId)
+                    : null;
 
                   return (
-                    <tr key={r.id} className={`border-b ${r.status === 'Rechazado' ? 'bg-red-50/40' : r.status === 'Aprobado' ? 'bg-emerald-50/40' : ''}`}>
+                    <tr
+                      key={r.id}
+                      className={`border-b ${r.status === 'Rechazado' ? 'bg-red-50/40' : r.status === 'Aprobado' ? 'bg-emerald-50/40' : ''}`}
+                    >
                       <td className="px-3 py-3 font-mono text-[10px]">{r.id}</td>
                       <td className="px-3 py-3">
                         <div className="text-xs font-medium">
-                          {associatedAccount?.bankName} - {associatedAccount?.accountNumber} ({associatedAccount?.country})
+                          {associatedAccount?.bankName} - {associatedAccount?.accountNumber} (
+                          {associatedAccount?.country})
                         </div>
                         <div className="text-xs">
                           {r.transferDate} | <b>${r.amount.toLocaleString()}</b>
                         </div>
                         {associatedMovement && (
                           <div className="text-[10px] text-emerald-600 mt-1 bg-emerald-50 p-1 rounded border border-emerald-100">
-                            Vínculo Cartola: {associatedMovement.bank} ({associatedMovement.movementId})
+                            Vínculo Cartola: {associatedMovement.bank} (
+                            {associatedMovement.movementId})
                           </div>
                         )}
                       </td>
                       <td className="px-3 py-3">{associatedClient?.name}</td>
                       <td className="px-3 py-3">
                         <Badge variant="secondary">{r.documents.length} PNRs</Badge>
-                        <Button variant="link" size="sm" className="h-auto p-0 ml-2 text-xs" onClick={() => {setViewingPnrs(r.documents); setIsPnrsModalOpen(true);}}>Ver PNRs</Button>
+                        <Button
+                          variant="link"
+                          size="sm"
+                          className="h-auto p-0 ml-2 text-xs"
+                          onClick={() => {
+                            setViewingPnrs(r.documents);
+                            setIsPnrsModalOpen(true);
+                          }}
+                        >
+                          Ver PNRs
+                        </Button>
                       </td>
                       <td className="px-3 py-3">
                         {r.supportFileName ? (
-                          <Button variant="link" size="sm" className="h-auto p-0 text-xs" onClick={() => onDownloadSupportFile(r.supportFileName!)}>
+                          <Button
+                            variant="link"
+                            size="sm"
+                            className="h-auto p-0 text-xs"
+                            onClick={() => onDownloadSupportFile(r.supportFileName!)}
+                          >
                             {r.supportFileName}
                           </Button>
                         ) : (
                           <span className="text-slate-500 text-xs">Sin soporte</span>
                         )}
-                        {isAgente && !r.supportFileName && (r.status === 'Pendiente' || r.status === 'Preaprobado' || r.status === 'Rechazado') && (
-                          <Button variant="outline" size="sm" className="h-auto p-1 ml-2 text-[10px]" onClick={() => onUploadSupportFileForRequest(r)}>
-                            Adjuntar Soporte
-                          </Button>
-                        )}
+                        {isAgente &&
+                          !r.supportFileName &&
+                          (r.status === 'Pendiente' ||
+                            r.status === 'Preaprobado' ||
+                            r.status === 'Rechazado') && (
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              className="h-auto p-1 ml-2 text-[10px]"
+                              onClick={() => onUploadSupportFileForRequest(r)}
+                            >
+                              Adjuntar Soporte
+                            </Button>
+                          )}
                       </td>
                       <td className="px-3 py-3">
-                        <Badge variant={r.status === 'Aprobado' ? 'default' : r.status === 'Rechazado' ? 'destructive' : 'outline'} className={
-                          r.status === 'Preaprobado' ? 'bg-amber-100 text-amber-700 border-amber-200' : ''
-                        }>
+                        <Badge
+                          variant={
+                            r.status === 'Aprobado'
+                              ? 'default'
+                              : r.status === 'Rechazado'
+                                ? 'destructive'
+                                : 'outline'
+                          }
+                          className={
+                            r.status === 'Preaprobado'
+                              ? 'bg-amber-100 text-amber-700 border-amber-200'
+                              : ''
+                          }
+                        >
                           {r.status}
                         </Badge>
                         {r.rejectionComment && (
-                          <div className="text-[10px] text-red-600 mt-1 italic">Motivo: {r.rejectionComment}</div>
+                          <div className="text-[10px] text-red-600 mt-1 italic">
+                            Motivo: {r.rejectionComment}
+                          </div>
                         )}
                       </td>
                       <td className="px-3 py-3">
                         {isRecaudacion && r.status !== 'Aprobado' && r.status !== 'Rechazado' && (
                           <div className="flex flex-col gap-2">
                             {r.status === 'Pendiente' && (
-                              <select 
+                              <select
                                 className="h-8 text-[10px] border rounded bg-white w-full p-1"
-                                value={manualMatchMovId[r.id] || ""}
-                                onChange={(e) => setManualMatchMovId({ ...manualMatchMovId, [r.id]: e.target.value })}
+                                value={manualMatchMovId[r.id] || ''}
+                                onChange={(e) =>
+                                  setManualMatchMovId({
+                                    ...manualMatchMovId,
+                                    [r.id]: e.target.value,
+                                  })
+                                }
                               >
                                 <option value="">Vincular Movimiento...</option>
                                 {movements
-                                  .filter(m => m.mainIdentification === 'Sin identificar' && Math.abs(m.amount - r.amount) < 1)
-                                  .map(m => (
+                                  .filter(
+                                    (m) =>
+                                      m.mainIdentification === 'Sin identificar' &&
+                                      Math.abs(m.amount - r.amount) < 1
+                                  )
+                                  .map((m) => (
                                     <option key={m.movementId} value={m.movementId}>
                                       {m.date} - {m.bank} (${m.amount.toLocaleString()})
                                     </option>
@@ -541,17 +721,32 @@ export function RecaudacionManagement({ userRole, bankAccounts, clients, movemen
                               </select>
                             )}
                             <div className="flex gap-1">
-                              <Button size="sm" variant="outline" className="h-7 text-[10px] flex-1" onClick={() => onProcessAction(r.id, 'Aprobar')}>
+                              <Button
+                                size="sm"
+                                variant="outline"
+                                className="h-7 text-[10px] flex-1"
+                                onClick={() => onProcessAction(r.id, 'Aprobar')}
+                              >
                                 {r.status === 'Preaprobado' ? 'Confirmar' : 'Validar'}
                               </Button>
-                              <Button size="sm" variant="destructive" className="h-7 text-[10px]" onClick={() => onProcessAction(r.id, 'Rechazar')} disabled={r.status === 'Rechazado'}>
+                              <Button
+                                size="sm"
+                                variant="destructive"
+                                className="h-7 text-[10px]"
+                                onClick={() => onProcessAction(r.id, 'Rechazar')}
+                              >
                                 Rechazar
                               </Button>
                             </div>
                           </div>
                         )}
                         {isAgente && (r.status === 'Pendiente' || r.status === 'Preaprobado') && (
-                          <Button variant="outline" size="sm" className="h-7 text-[10px]" onClick={() => onEditRequest(r)}>
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            className="h-7 text-[10px]"
+                            onClick={() => onEditRequest(r)}
+                          >
                             Editar
                           </Button>
                         )}
@@ -576,7 +771,7 @@ export function RecaudacionManagement({ userRole, bankAccounts, clients, movemen
             {viewingPnrs.length === 0 ? (
               <p>No hay PNRs asociados.</p>
             ) : (
-              viewingPnrs.map(doc => (
+              viewingPnrs.map((doc) => (
                 <div key={doc.id} className="flex justify-between items-center border-b pb-1">
                   <span className="font-medium">{doc.reference}</span>
                   <span>${doc.amount.toLocaleString()}</span>
@@ -601,13 +796,22 @@ export function RecaudacionManagement({ userRole, bankAccounts, clients, movemen
           </DialogHeader>
           <div className="grid gap-4 py-4">
             <Input type="file" onChange={handleSupportFileUpload} />
-            {newSupportFileForRequest && <p className="text-sm text-slate-600">Archivo seleccionado: {newSupportFileForRequest.name}</p>}
+            {newSupportFileForRequest && (
+              <p className="text-sm text-slate-600">
+                Archivo seleccionado: {newSupportFileForRequest.name}
+              </p>
+            )}
           </div>
           <DialogFooter>
-            <Button variant="outline" onClick={() => setIsUploadSupportModalOpen(false)}>Cancelar</Button>
-            <Button onClick={onConfirmUploadSupport} disabled={!newSupportFileForRequest}>Adjuntar</Button>
+            <Button variant="outline" onClick={() => setIsUploadSupportModalOpen(false)}>
+              Cancelar
+            </Button>
+            <Button onClick={onConfirmUploadSupport} disabled={!newSupportFileForRequest}>
+              Adjuntar
+            </Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
     </div>
   );
+}

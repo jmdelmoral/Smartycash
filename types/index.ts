@@ -5,10 +5,19 @@
 export type UserRole =
   | 'Administrador'
   | 'Contabilidad'
-  | 'Recaudación'
-  | 'Conciliación medios de pago'
-  | 'Agente CC'
+  | 'Recaudacion'
+  | 'ConciliacionMediosDePago'
+  | 'AgenteCC'
   | 'Cobranza';
+
+export const USER_ROLE_LABELS: Record<UserRole, string> = {
+  Administrador: 'Administrador',
+  Contabilidad: 'Contabilidad',
+  Recaudacion: 'Recaudación',
+  ConciliacionMediosDePago: 'Conciliación medios de pago',
+  AgenteCC: 'Agente CC',
+  Cobranza: 'Cobranza',
+};
 
 export type UserRecord = {
   id: string;
@@ -23,6 +32,8 @@ export type BankAccount = {
   bankName: string;
   accountNumber: string;
   country: string;
+  currency?: string;
+  isActive?: boolean;
 };
 
 export type Client = {
@@ -31,6 +42,7 @@ export type Client = {
   taxId: string; // RUT/DNI
   navitaireCode?: string;
   sapBP?: string;
+  isActive?: boolean;
 };
 
 export type CollectionStatus = 'Pendiente' | 'Preaprobado' | 'Aprobado' | 'Rechazado';
@@ -48,11 +60,7 @@ export type CollectionRequest = {
   documents: CartolaDocument[]; // Detalle de PNRs
 };
 
-export type MainIdentificationType = 
-  | 'Sin identificar' 
-  | 'Adquiriente' 
-  | 'GC' 
-  | 'Cobranza crédito';
+export type MainIdentificationType = 'Sin identificar' | 'Adquiriente' | 'GC' | 'Cobranza crédito';
 
 export type CartolaDocument = {
   id: string;
@@ -76,7 +84,7 @@ export type CartolaMovement = {
   documents: CartolaDocument[];
 };
 
-export type CobranzaDocumentType = 'Factura' | 'Nota de cobro';
+export type CobranzaDocumentType = 'Factura' | 'Nota de cobro' | 'Nota de Crédito';
 export type CobranzaStatus = 'Pendiente' | 'Pagado' | 'Parcial';
 
 export type CobranzaMainDocument = {

@@ -1,8 +1,9 @@
 'use client';
 
 import { useState } from 'react';
-import { Input } from '@/components/ui/input';
+
 import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
 import { Client } from '@/types';
 
 interface ClientManagementProps {
@@ -19,7 +20,7 @@ export function ClientManagement({ clients, onAddClient, onDeleteClient }: Clien
 
   const handleAdd = () => {
     if (!name || !taxId) return;
-    onAddClient({ id: `CLI-${Date.now()}`, name, taxId, navitaireCode, sapBP });
+    onAddClient({ id: `CLI-${Date.now()}`, name, taxId, navitaireCode, sapBP, isActive: true });
     setName('');
     setTaxId('');
     setNavitaireCode('');
@@ -33,15 +34,27 @@ export function ClientManagement({ clients, onAddClient, onDeleteClient }: Clien
         <div className="grid grid-cols-1 gap-4 md:grid-cols-5 items-end">
           <div className="space-y-2">
             <label className="text-sm font-medium">Nombre Cliente / Agencia</label>
-            <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="Ej: Latam Travel" />
+            <Input
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              placeholder="Ej: Latam Travel"
+            />
           </div>
           <div className="space-y-2">
             <label className="text-sm font-medium">RUT / Tax ID</label>
-            <Input value={taxId} onChange={(e) => setTaxId(e.target.value)} placeholder="77.123.456-K" />
+            <Input
+              value={taxId}
+              onChange={(e) => setTaxId(e.target.value)}
+              placeholder="77.123.456-K"
+            />
           </div>
           <div className="space-y-2">
             <label className="text-sm font-medium">Cód. Navitaire</label>
-            <Input value={navitaireCode} onChange={(e) => setNavitaireCode(e.target.value)} placeholder="N-123" />
+            <Input
+              value={navitaireCode}
+              onChange={(e) => setNavitaireCode(e.target.value)}
+              placeholder="N-123"
+            />
           </div>
           <div className="space-y-2">
             <label className="text-sm font-medium">BP SAP</label>
@@ -70,9 +83,9 @@ export function ClientManagement({ clients, onAddClient, onDeleteClient }: Clien
                 <td className="px-4 py-3 font-mono text-xs">{c.navitaireCode || '-'}</td>
                 <td className="px-4 py-3 font-mono text-xs">{c.sapBP || '-'}</td>
                 <td className="px-4 py-3 text-right">
-                  <Button 
-                    variant="ghost" 
-                    size="sm" 
+                  <Button
+                    variant="ghost"
+                    size="sm"
                     className="text-red-600"
                     onClick={() => onDeleteClient(c.id)}
                   >
