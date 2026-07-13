@@ -56,6 +56,7 @@ export function uiIdentificationToPrisma(value: MainIdentificationType | string)
   if (value === 'Adquiriente') return 'Adquiriente';
   if (value === 'GC') return 'GC';
   if (value === 'Cobranza crédito') return 'CobranzaCredito';
+  if (value === 'Abono débito') return 'AbonoDebito';
   return 'SinIdentificar';
 }
 
@@ -63,6 +64,7 @@ export function prismaIdentificationToUi(value: string): MainIdentificationType 
   if (value === 'Adquiriente') return 'Adquiriente';
   if (value === 'GC') return 'GC';
   if (value === 'CobranzaCredito') return 'Cobranza crédito';
+  if (value === 'AbonoDebito') return 'Abono débito';
   return 'Sin identificar';
 }
 
@@ -93,6 +95,7 @@ export function cartolaToUi(movement: CartolaWithAllocations): CartolaMovement {
 
   return {
     movementId: movement.id,
+    displayId: movement.displayId ?? undefined,
     ownerUserId: movement.ownerUserId ?? 'N/A',
     amount: Number(movement.amount),
     bank: movement.bank,

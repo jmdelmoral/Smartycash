@@ -4,6 +4,7 @@ import { useMemo, useState } from 'react';
 import * as XLSX from 'xlsx';
 
 import { Badge } from '@/components/ui/badge';
+import { formatDate } from '@/lib/format';
 import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
 import {
@@ -102,8 +103,8 @@ export function RecaudacionManagement({
 
   const onDownloadMassUploadTemplate = () => {
     const headers = ['Cuenta', 'Fecha', 'ClienteID', 'PNR', 'MontoPNR', 'MontoTotal'].join(',');
-    const sample = '12345678,2024-05-21,CLI-1,ABC123,50000,50000';
-    const blob = new Blob([`${headers}\n${sample}\n`], { type: 'text/csv;charset=utf-8;' });
+    const sample = '12345678,21/05/2024,CLI-1,ABC123,50000,50000';
+    const blob = new Blob(['\uFEFF' + `${headers}\n${sample}\n`], { type: 'text/csv;charset=utf-8;' });
     const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
     link.href = url;
@@ -158,9 +159,14 @@ export function RecaudacionManagement({
         const client = clients.find((c) => c.id === String(first.ClienteID));
         if (!client) throw new Error(`ClienteID ${first.ClienteID} no registrado.`);
 
-        // Fecha: Validar formato YYYY-MM-DD
-        if (!/^\d{4}-\d{2}-\d{2}$/.test(String(first.Fecha)))
-          throw new Error(`Formato de fecha inválido (esperado YYYY-MM-DD) en solicitud ${key}.`);
+        // Fecha: acepta dd/mm/yyyy (o yyyy-mm-dd) y normaliza a ISO (yyyy-mm-dd).
+        const rawFecha = String(first.Fecha).trim();
+        const ymd = /^(\d{4})-(\d{2})-(\d{2})$/.exec(rawFecha);
+        const dmy = /^(\d{2})[/-](\d{2})[/-](\d{4})$/.exec(rawFecha);
+        let isoDate: string;
+        if (ymd) isoDate = `${ymd[1]}-${ymd[2]}-${ymd[3]}`;
+        else if (dmy) isoDate = `${dmy[3]}-${dmy[2]}-${dmy[1]}`;
+        else throw new Error(`Formato de fecha inválido (usa dd/mm/yyyy) en solicitud ${key}.`);
 
         const docs: CartolaDocument[] = groupRows.map((r: any) => {
           const pnr = String(r.PNR).toUpperCase();
@@ -179,8 +185,9 @@ export function RecaudacionManagement({
         });
         // --- Fin Validaciones ---
 
-        const [year, month, day] = String(first.Fecha).split('-');
+        const [year, month, day] = isoDate.split('-');
         const reversedDate = `${day}-${month}-${year}`;
+        const slashDate = `${day}/${month}/${year}`;
 
         const matchingMov = movements.find(
           (m) =>
@@ -188,14 +195,16 @@ export function RecaudacionManagement({
               String(first.Cuenta).replace(/\D/g, '') &&
             Math.round(m.amount) === Math.round(totalAmount) &&
             m.mainIdentification === 'Sin identificar' &&
-            (m.date.includes(String(first.Fecha)) || m.date.includes(reversedDate)) &&
+            (m.date.includes(isoDate) ||
+              m.date.includes(reversedDate) ||
+              m.date.includes(slashDate)) &&
             m.bank.toLowerCase().includes(account.bankName.toLowerCase())
         );
 
         newRequests.push({
           id: generateRequestId(),
           bankAccountId: account.id,
-          transferDate: String(first.Fecha),
+          transferDate: isoDate,
           amount: totalAmount,
           clientId: client.id,
           supportFileName: 'archivo_masivo.zip', // Placeholder, will be updated later
@@ -263,6 +272,7 @@ export function RecaudacionManagement({
     // transferDate viene como YYYY-MM-DD desde el input
     const [year, month, day] = transferDate.split('-');
     const reversedDate = `${day}-${month}-${year}`; // Formato DD-MM-YYYY común en cartolas
+    const slashDate = `${day}/${month}/${year}`;
 
     const matchingMovement = movements.find(
       (m) =>
@@ -274,7 +284,9 @@ export function RecaudacionManagement({
         m.mainIdentification === 'Sin identificar' &&
         // 4. Comparación de Fecha Flexible
         // Valida si la fecha de la cartola contiene YYYY-MM-DD o coincide con DD-MM-YYYY
-        (m.date.includes(transferDate) || m.date.includes(reversedDate)) &&
+        (m.date.includes(transferDate) ||
+          m.date.includes(reversedDate) ||
+          m.date.includes(slashDate)) &&
         // 5. El banco debe coincidir (búsqueda parcial)
         m.bank.toLowerCase().includes(account.bankName.toLowerCase())
     );
@@ -528,7 +540,7 @@ export function RecaudacionManagement({
         ID: r.id,
         Banco: acc?.bankName || 'N/A',
         Cuenta: acc?.accountNumber || 'N/A',
-        Fecha_Transferencia: r.transferDate,
+        Fecha_Transferencia: formatDate(r.transferDate),
         Monto_Total: r.amount,
         Cliente: cli?.name || 'N/A',
         Cant_PNRs: r.documents.length,
@@ -742,7 +754,7 @@ export function RecaudacionManagement({
                           {associatedAccount?.country})
                         </div>
                         <div className="text-xs">
-                          {r.transferDate} | <b>${r.amount.toLocaleString()}</b>
+                          {formatDate(r.transferDate)} | <b>${r.amount.toLocaleString()}</b>
                         </div>
                         {r.authorizationCode && (
                           <div className="text-[10px] text-slate-500 mt-0.5">
@@ -753,7 +765,7 @@ export function RecaudacionManagement({
                         {associatedMovement && (
                           <div className="text-[10px] text-emerald-600 mt-1 bg-emerald-50 p-1 rounded border border-emerald-100">
                             Vínculo Cartola: {associatedMovement.bank} (
-                            {associatedMovement.movementId})
+                            {associatedMovement.displayId || associatedMovement.movementId})
                           </div>
                         )}
                       </td>

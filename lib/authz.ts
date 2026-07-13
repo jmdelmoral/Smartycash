@@ -23,7 +23,8 @@ export type BusinessModule =
   | 'Recaudacion'
   | 'Clientes'
   | 'BankAccounts'
-  | 'Usuarios';
+  | 'Usuarios'
+  | 'Contabilidad';
 
 const ALL_ROLES: readonly UserRole[] = [
   'Administrador',
@@ -44,6 +45,7 @@ const READ_ROLES: Record<BusinessModule, readonly UserRole[]> = {
   Clientes: ALL_ROLES,
   BankAccounts: ALL_ROLES,
   Usuarios: ['Administrador'],
+  Contabilidad: ['Administrador', 'Contabilidad'],
 };
 
 /** Roles allowed to WRITE (create/edit) in each module. */
@@ -54,6 +56,7 @@ const WRITE_ROLES: Record<BusinessModule, readonly UserRole[]> = {
   Clientes: ['Administrador'],
   BankAccounts: ['Administrador'],
   Usuarios: ['Administrador'],
+  Contabilidad: ['Administrador', 'Contabilidad'],
 };
 
 /**

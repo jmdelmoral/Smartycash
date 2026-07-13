@@ -34,6 +34,7 @@ model User {
   createdCobranzaDocuments   CobranzaDocument[]          @relation("CobranzaDocumentCreatedBy")
   createdAllocations         CartolaMovementAllocation[] @relation("AllocationCreatedBy")
   createdPayments            Payment[]                   @relation("PaymentCreatedBy")
+  createdClosures            Closure[]                   @relation("ClosureCreatedBy")
   auditLogs                  AuditLog[]                  @relation("AuditActor")
 }
 
@@ -152,6 +153,7 @@ model BankStatementImport {
 
 model CartolaMovement {
   id                 String                 @id @default(cuid())
+  displayId          String?                @unique // codigo visible: CL-BAN-5678-202606-000123
   importId           String?
   import             BankStatementImport?   @relation(fields: [importId], references: [id], onDelete: SetNull)
   externalReference  String?
@@ -172,8 +174,11 @@ model CartolaMovement {
   asientoContableAt  DateTime? // fecha del asiento contable
   originYear         Int? // ano del periodo de origen (materializado desde `date`)
   originMonth        Int? // mes del periodo de origen (1-12)
+  finalizedInClosureId String? // cierre donde el movimiento quedo CerradoDefinitivo
   ownerUserId        String?
   ownerUser          User?                  @relation("CartolaMovementOwner", fields: [ownerUserId], references: [id], onDelete: SetNull)
+  finalizedInClosure Closure?               @relation("FinalizedInClosure", fields: [finalizedInClosureId], references: [id], onDelete: SetNull)
+  closureItems       ClosureItem[]
   createdAt          DateTime               @default(now())
   updatedAt          DateTime               @updatedAt
 
@@ -187,6 +192,7 @@ model CartolaMovement {
   @@index([identificationType])
   @@index([closeState])
   @@index([originYear, originMonth])
+  @@index([finalizedInClosureId])
 }
 
 model CartolaMovementAllocation {
@@ -414,6 +420,7 @@ enum MainIdentificationType {
   Adquiriente
   GC
   CobranzaCredito @map("Cobranza crédito")
+  AbonoDebito     @map("Abono débito")
 }
 
 enum MovementStatus {
@@ -465,4 +472,55 @@ enum PaymentSourceType {
   BankMovement
   CreditNote
   ManualAdjustment
+}
+
+model Closure {
+  id               String   @id @default(cuid())
+  label            String? // nombre opcional del cierre
+  dateFrom         DateTime // inicio del rango (por fecha bancaria del movimiento)
+  dateTo           DateTime // fin del rango
+  createdById      String?
+  createdBy        User?    @relation("ClosureCreatedBy", fields: [createdById], references: [id], onDelete: SetNull)
+  createdAt        DateTime @default(now())
+  // Snapshot al generar el cierre
+  totalCount       Int?
+  identifiedCount  Int?
+  pendingCount     Int?
+  totalAmount      Decimal? @db.Decimal(18, 2)
+  identifiedAmount Decimal? @db.Decimal(18, 2)
+  pendingAmount    Decimal? @db.Decimal(18, 2)
+
+  items              ClosureItem[]
+  finalizedMovements CartolaMovement[] @relation("FinalizedInClosure")
+
+  @@index([dateFrom, dateTo])
+}
+
+model ClosureItem {
+  id                   String                 @id @default(cuid())
+  closureId            String
+  closure              Closure                @relation(fields: [closureId], references: [id], onDelete: Cascade)
+  movementId           String
+  movement             CartolaMovement        @relation(fields: [movementId], references: [id], onDelete: Cascade)
+  // Snapshot del movimiento EN este cierre
+  closeState           MovementCloseState // CerradoParcial o CerradoDefinitivo
+  identificationType   MainIdentificationType // categoria al momento del cierre
+  amount               Decimal                @db.Decimal(18, 2)
+  originYear           Int
+  originMonth          Int
+  // Si este item finaliza un pendiente arrastrado de un cierre anterior
+  carriedFromClosureId String?
+  createdAt            DateTime               @default(now())
+
+  @@unique([closureId, movementId])
+  @@index([closureId])
+  @@index([movementId])
+}
+
+model AccountingCategory {
+  category    String   @id // Adquiriente | GC | CobranzaCredito | AbonoDebito | SinIdentificar
+  accountCode String? // cuenta contable para el resumen del cierre
+  accountName String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
 }

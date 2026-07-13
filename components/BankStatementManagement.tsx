@@ -6,15 +6,25 @@ import * as XLSX from 'xlsx';
 import { z } from 'zod';
 
 import { Badge } from '@/components/ui/badge';
+import { formatDate } from '@/lib/format';
 import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
-import { BankAccount, CartolaDocument, CartolaMovement, MainIdentificationType } from '@/types';
+import {
+  BankAccount,
+  CartolaDocument,
+  CartolaMovement,
+  Client,
+  MainIdentificationType,
+} from '@/types';
 
 interface BankStatementManagementProps {
   availableAccounts: BankAccount[];
+  clients: Client[];
   movements: CartolaMovement[];
   setMovements: React.Dispatch<React.SetStateAction<CartolaMovement[]>>;
+  /** Carga inicial de datos en curso (para mostrar indicador de carga). */
+  loading?: boolean;
 }
 
 const mainIdentificationMap: Record<MainIdentificationType, string> = {
@@ -22,6 +32,7 @@ const mainIdentificationMap: Record<MainIdentificationType, string> = {
   Adquiriente: 'IDN-ADQ',
   GC: 'IDN-GC',
   'Cobranza crédito': 'IDN-CC',
+  'Abono débito': 'IDN-AD',
 };
 
 const csvHeaders = [
@@ -86,7 +97,7 @@ const cartolaSchema = z.object({
       const normalized = String(value).trim();
       return normalized === '' ? 'Sin identificar' : normalized;
     },
-    z.enum(['Sin identificar', 'Adquiriente', 'GC', 'Cobranza crédito'])
+    z.enum(['Sin identificar', 'Adquiriente', 'GC', 'Cobranza crédito', 'Abono débito'])
   ),
 });
 
@@ -96,7 +107,7 @@ const documentDetailsUploadSchema = z.object({
   Monto: z.coerce.number().positive(),
   Detalle: z.string().optional().default(''),
   TipoPrincipal: z
-    .enum(['Sin identificar', 'Adquiriente', 'GC', 'Cobranza crédito'])
+    .enum(['Sin identificar', 'Adquiriente', 'GC', 'Cobranza crédito', 'Abono débito'])
     .default('Sin identificar'),
 });
 
@@ -108,8 +119,10 @@ const ITEMS_PER_PAGE = 20; // filas por página en la tabla de Cartola (ajústal
 
 export function BankStatementManagement({
   availableAccounts,
+  clients,
   movements,
   setMovements,
+  loading = false,
 }: BankStatementManagementProps) {
   const { data: session } = useSession();
   const [selectedMovementId, setSelectedMovementId] = useState<string | null>(null);
@@ -225,8 +238,8 @@ export function BankStatementManagement({
   const onDownloadCartolaTemplate = () => {
     const headers = csvHeaders.join(',');
     const sample =
-      '10000,Abono ejemplo,2026-04-21,Banco Estado,12345678,Chile,C1,C2,C3,C4,C5,Sin identificar';
-    const blob = new Blob([`${headers}\n${sample}\n`], { type: 'text/csv;charset=utf-8;' });
+      '10000,Abono ejemplo,21/04/2026,Banco Estado,12345678,Chile,C1,C2,C3,C4,C5,Sin identificar';
+    const blob = new Blob(['\uFEFF' + `${headers}\n${sample}\n`], { type: 'text/csv;charset=utf-8;' });
     const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
     link.href = url;
@@ -239,8 +252,8 @@ export function BankStatementManagement({
 
   const onDownloadDetailsTemplate = () => {
     const headers = ['MovimientoID', 'Referencia', 'Monto', 'Detalle', 'TipoPrincipal'].join(',');
-    const sample = 'MOV-ID-EJEMPLO,DOC-123,5000,Pago factura,Adquiriente';
-    const blob = new Blob([`${headers}\n${sample}\n`], { type: 'text/csv;charset=utf-8;' });
+    const sample = 'CL-BAN-5678-202606-000123,DOC-123,5000,Pago factura,Adquiriente';
+    const blob = new Blob(['\uFEFF' + `${headers}\n${sample}\n`], { type: 'text/csv;charset=utf-8;' });
     const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
     link.href = url;
@@ -253,7 +266,7 @@ export function BankStatementManagement({
   const onExportDocumentDetails = () => {
     const data = movements.flatMap((m) =>
       m.documents.map((d) => ({
-        MovimientoID: m.movementId,
+        MovimientoID: m.displayId || m.movementId,
         Banco: m.bank,
         Cuenta: m.bankAccount,
         Referencia: d.reference,
@@ -270,11 +283,11 @@ export function BankStatementManagement({
 
   const onExportMovements = () => {
     const data = prioritizedMovements.map((m) => ({
-      ID: m.movementId,
+      ID: m.displayId || m.movementId,
       Banco: m.bank,
       Cuenta: m.bankAccount,
       Monto: m.amount,
-      Fecha: m.date,
+      Fecha: formatDate(m.date),
       Tipo: m.mainIdentification,
     }));
     const ws = XLSX.utils.json_to_sheet(data);
@@ -286,7 +299,13 @@ export function BankStatementManagement({
   const readRowsFromFile = async (file: File): Promise<Record<string, unknown>[]> => {
     const lowerName = file.name.toLowerCase();
     if (lowerName.endsWith('.csv')) {
-      const text = await file.text();
+      const buf = await file.arrayBuffer();
+      let text = new TextDecoder('utf-8').decode(buf);
+      // Si el archivo se guardó como ANSI (Windows-1252), reintenta con ese encoding.
+      if (text.includes('\uFFFD')) {
+        text = new TextDecoder('windows-1252').decode(buf);
+      }
+      text = text.replace(/^\uFEFF/, ''); // quita BOM si existe
       const workbook = XLSX.read(text, { type: 'string' });
       const worksheet = workbook.Sheets[workbook.SheetNames[0]];
       return XLSX.utils.sheet_to_json<Record<string, unknown>>(worksheet, { defval: '' });
@@ -368,7 +387,7 @@ export function BankStatementManagement({
 
           for (const movId in groupedByMov) {
             const details = groupedByMov[movId]!;
-            const movement = nextMovements.find((m) => m.movementId === movId);
+            const movement = nextMovements.find((m) => m.movementId === movId || m.displayId === movId);
 
             if (!movement) throw new Error(`El MovimientoID ${movId} no existe.`);
 
@@ -380,11 +399,29 @@ export function BankStatementManagement({
               );
             }
 
-            // 2. Validar Cuadratura de Montos
-            const totalDetails = details.reduce((sum, d) => sum + d.Monto, 0);
-            if (totalDetails !== movement.amount) {
+            // Abono débito: el detalle referencia clientes registrados (navitaireCode o appCode).
+            if (firstType === 'Abono débito') {
+              const clientCodes = new Set(
+                clients
+                  .flatMap((c) => [c.navitaireCode, c.appCode])
+                  .filter((x): x is string => !!x)
+                  .map((x) => x.toUpperCase())
+              );
+              for (const d of details) {
+                if (!clientCodes.has(String(d.Referencia).toUpperCase())) {
+                  throw new Error(
+                    `Movimiento ${movId}: el código "${d.Referencia}" (Abono débito) no corresponde a un cliente registrado.`
+                  );
+                }
+              }
+            }
+
+            // 2. Validar Cuadratura de Montos (redondeo a 2 decimales + tolerancia de $0.01)
+            const round2 = (n: number) => Math.round(n * 100) / 100;
+            const totalDetails = round2(details.reduce((sum, d) => sum + d.Monto, 0));
+            if (Math.abs(totalDetails - round2(movement.amount)) > 0.01) {
               throw new Error(
-                `Cuadratura fallida en ID ${movId}: Cartola $${movement.amount} vs Excel $${totalDetails}.`
+                `Cuadratura fallida en ID ${movId}: Cartola $${movement.amount} vs detalle $${totalDetails}.`
               );
             }
 
@@ -548,7 +585,9 @@ export function BankStatementManagement({
       return;
     }
     const documentsTotal = manualDocuments.reduce((acc, d) => acc + d.amount, 0);
-    if (documentsTotal !== amount) {
+    // Documentos opcionales: sin documentos el movimiento queda "por identificar".
+    // Si se agregan, deben cuadrar con el monto.
+    if (manualDocuments.length > 0 && documentsTotal !== amount) {
       setManualError(`La suma (${documentsTotal}) debe ser igual al monto (${amount}).`);
       return;
     }
@@ -713,7 +752,7 @@ export function BankStatementManagement({
               onChange={(e) => setTypeFilter(e.target.value)}
             >
               <option value="all">Todos los tipos</option>
-              {['Sin identificar', 'Adquiriente', 'GC', 'Cobranza crédito'].map((t) => (
+              {['Sin identificar', 'Adquiriente', 'GC', 'Cobranza crédito', 'Abono débito'].map((t) => (
                 <option key={t} value={t}>
                   {t}
                 </option>
@@ -743,12 +782,28 @@ export function BankStatementManagement({
               </tr>
             </thead>
             <tbody>
-              {paginatedMovements.map((m) => (
+              {loading ? (
+                <tr>
+                  <td colSpan={7} className="px-3 py-12 text-center text-slate-500">
+                    <span className="inline-flex items-center gap-2">
+                      <span className="h-4 w-4 animate-spin rounded-full border-2 border-slate-300 border-t-slate-600" />
+                      Cargando movimientos…
+                    </span>
+                  </td>
+                </tr>
+              ) : paginatedMovements.length === 0 ? (
+                <tr>
+                  <td colSpan={7} className="px-3 py-12 text-center text-slate-400">
+                    No hay movimientos para mostrar.
+                  </td>
+                </tr>
+              ) : (
+                paginatedMovements.map((m) => (
                 <tr
                   key={m.movementId}
                   className={`border-t align-top transition-colors ${m.mainIdentification !== 'Sin identificar' ? 'bg-emerald-50/40' : ''}`}
                 >
-                  <td className="px-3 py-3 text-[10px] font-mono text-slate-400">{m.movementId}</td>
+                  <td className="px-3 py-3 text-[10px] font-mono text-slate-400">{m.displayId || m.movementId}</td>
                   <td className="px-3 py-3">
                     <div className="font-medium">{m.bank}</div>
                     <div className="text-[10px] text-slate-500">
@@ -759,7 +814,7 @@ export function BankStatementManagement({
                     {m.amount.toLocaleString('es-CL', { style: 'currency', currency: 'CLP' })}
                   </td>
                   <td className="px-3 py-3">{m.description}</td>
-                  <td className="px-3 py-3">{m.date}</td>
+                  <td className="px-3 py-3">{formatDate(m.date)}</td>
                   <td className="px-3 py-3">{m.mainIdentification}</td>
                   <td className="px-3 py-3">
                     <div className="flex gap-2">
@@ -788,7 +843,8 @@ export function BankStatementManagement({
                     </div>
                   </td>
                 </tr>
-              ))}
+                ))
+              )}
             </tbody>
           </table>
         </div>
@@ -979,7 +1035,7 @@ export function BankStatementManagement({
                 value={editType}
                 onChange={(e) => setEditType(e.target.value as MainIdentificationType)}
               >
-                {['Sin identificar', 'Adquiriente', 'GC', 'Cobranza crédito'].map((t) => (
+                {['Sin identificar', 'Adquiriente', 'GC', 'Cobranza crédito', 'Abono débito'].map((t) => (
                   <option key={t} value={t}>
                     {t}
                   </option>
@@ -991,11 +1047,29 @@ export function BankStatementManagement({
             </div>
 
             <div className="flex gap-2 mb-4">
-              <Input
-                placeholder="Ref"
-                value={editDocumentRef}
-                onChange={(e) => setEditDocumentRef(e.target.value)}
-              />
+              {editType === 'Abono débito' ? (
+                <select
+                  className="h-10 flex-1 rounded-md border bg-white px-2 text-sm"
+                  value={editDocumentRef}
+                  onChange={(e) => setEditDocumentRef(e.target.value)}
+                >
+                  <option value="">Selecciona cliente…</option>
+                  {clients.map((c) => {
+                    const code = c.navitaireCode || c.appCode || '';
+                    return (
+                      <option key={c.id} value={code}>
+                        {code} — {c.name}
+                      </option>
+                    );
+                  })}
+                </select>
+              ) : (
+                <Input
+                  placeholder="Ref"
+                  value={editDocumentRef}
+                  onChange={(e) => setEditDocumentRef(e.target.value)}
+                />
+              )}
               <Input
                 type="number"
                 placeholder="Monto"

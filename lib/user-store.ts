@@ -151,3 +151,17 @@ export async function changeUserPassword(email: string, nextPassword: string): P
     data: { passwordHash: hashPassword(nextPassword), mustChangePassword: false },
   });
 }
+
+export async function resetUserPassword(
+  userId: string
+): Promise<{ user: PublicUser; temporaryPassword: string }> {
+  await ensureSeedAdminUser();
+  const target = await prisma.user.findUnique({ where: { id: userId } });
+  if (!target) throw new Error('Usuario no encontrado.');
+  const temporaryPassword = generateRandomPassword();
+  const updated = await prisma.user.update({
+    where: { id: userId },
+    data: { passwordHash: hashPassword(temporaryPassword), mustChangePassword: true },
+  });
+  return { user: toPublicUser(updated), temporaryPassword };
+}

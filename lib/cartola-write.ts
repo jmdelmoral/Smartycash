@@ -6,6 +6,7 @@
  * behaviour of the old bulk PUT. Used by the POST (create/edit) endpoint.
  */
 import { Prisma } from '@/lib/generated/prisma';
+import { nextMovementDisplayId, type DisplayIdAllocator } from '@/lib/cartola-display';
 import {
   moduleFromIdentification,
   movementStatusFromDocuments,
@@ -42,11 +43,36 @@ export type AuditEvent = {
   metadata?: unknown;
 };
 
+/**
+ * Validación de cuadratura (servidor): un movimiento identificado (tipo distinto
+ * de "Sin identificar") debe tener al menos un documento y que la suma de sus
+ * documentos iguale el monto del movimiento (tolerancia de $0.01). Devuelve un
+ * mensaje de error o null si está OK.
+ */
+export function movementBalanceError(movement: {
+  movementId: string;
+  amount: number;
+  mainIdentification: string;
+  documents: { amount: number }[];
+}): string | null {
+  if (movement.mainIdentification === 'Sin identificar') return null;
+  if (movement.documents.length === 0) {
+    return `Movimiento ${movement.movementId}: un movimiento identificado (${movement.mainIdentification}) requiere al menos un documento.`;
+  }
+  const round2 = (n: number) => Math.round(n * 100) / 100;
+  const sum = round2(movement.documents.reduce((acc, d) => acc + d.amount, 0));
+  if (Math.abs(sum - round2(movement.amount)) > 0.01) {
+    return `Movimiento ${movement.movementId}: la suma de documentos (${sum}) no cuadra con el monto (${round2(movement.amount)}).`;
+  }
+  return null;
+}
+
 export async function applyMovement(
   tx: Prisma.TransactionClient,
   movement: MovementInput,
   userId: string | undefined,
-  auditEvents: AuditEvent[]
+  auditEvents: AuditEvent[],
+  allocate?: DisplayIdAllocator
 ): Promise<void> {
   const previous = await tx.cartolaMovement.findUnique({
     where: { id: movement.movementId },
@@ -63,9 +89,17 @@ export async function applyMovement(
     },
   });
 
+  // Código visible: se asigna a nuevos o a existentes sin código (backfill perezoso).
+  const displayId = previous?.displayId
+    ? undefined
+    : allocate
+      ? await allocate(movement)
+      : await nextMovementDisplayId(tx, movement);
+
   await tx.cartolaMovement.upsert({
     where: { id: movement.movementId },
     update: {
+      displayId,
       bankAccountId: bankAccount?.id,
       bank: movement.bank,
       bankAccountNumber: movement.bankAccount,
@@ -80,6 +114,7 @@ export async function applyMovement(
     },
     create: {
       id: movement.movementId,
+      displayId,
       bankAccountId: bankAccount?.id,
       bank: movement.bank,
       bankAccountNumber: movement.bankAccount,

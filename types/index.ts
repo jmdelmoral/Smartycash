@@ -80,7 +80,12 @@ export type CollectionRequest = {
   documents: CartolaDocument[]; // Detalle de PNRs
 };
 
-export type MainIdentificationType = 'Sin identificar' | 'Adquiriente' | 'GC' | 'Cobranza crédito';
+export type MainIdentificationType =
+  | 'Sin identificar'
+  | 'Adquiriente'
+  | 'GC'
+  | 'Cobranza crédito'
+  | 'Abono débito';
 
 export type CartolaDocument = {
   id: string;
@@ -91,6 +96,7 @@ export type CartolaDocument = {
 
 export type CartolaMovement = {
   movementId: string;
+  displayId?: string; // codigo visible legible
   ownerUserId: string;
   amount: number;
   bank: string;

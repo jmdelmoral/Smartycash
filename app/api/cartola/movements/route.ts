@@ -6,7 +6,9 @@ import { auditAction } from '@/lib/audit';
 import { authOptions } from '@/lib/auth';
 import { canRead, canWrite } from '@/lib/authz';
 import { buildMovementWhere, parsePagination } from '@/lib/cartola-filters';
-import { applyMovement, type AuditEvent } from '@/lib/cartola-write';
+import { Prisma } from '@/lib/generated/prisma';
+import { applyMovement, movementBalanceError, type AuditEvent } from '@/lib/cartola-write';
+import { createDisplayIdAllocator } from '@/lib/cartola-display';
 import {
   cartolaToUi,
   moduleFromIdentification,
@@ -38,6 +40,7 @@ const movementSchema = z.object({
     'Adquiriente',
     'GC',
     'Cobranza crédito',
+    'Abono débito',
   ]),
   mainIdentificationId: z.string().optional().default(''),
   documents: z.array(documentSchema),
@@ -104,6 +107,13 @@ export async function PUT(request: Request) {
     );
   }
 
+  for (const movement of parsed.data.movements) {
+    const balanceError = movementBalanceError(movement);
+    if (balanceError) {
+      return NextResponse.json({ error: balanceError }, { status: 400 });
+    }
+  }
+
   const movementIds = parsed.data.movements.map((movement) => movement.movementId);
   const payloadIdSet = new Set(movementIds);
   // Only reverse records the client knew about and dropped. When knownIds is
@@ -125,6 +135,8 @@ export async function PUT(request: Request) {
       include: { allocations: true },
     });
     const existingById = new Map(existingMovements.map((movement) => [movement.id, movement]));
+    // Un solo cálculo del correlativo por lote (evita el timeout P2028).
+    const allocate = createDisplayIdAllocator(tx);
 
     const movementsToReverse = await tx.cartolaMovement.findMany({
       where: {
@@ -163,9 +175,12 @@ export async function PUT(request: Request) {
         },
       });
 
+      const displayId = previous?.displayId ? undefined : await allocate(movement);
+
       await tx.cartolaMovement.upsert({
         where: { id: movement.movementId },
         update: {
+          displayId,
           bankAccountId: bankAccount?.id,
           bank: movement.bank,
           bankAccountNumber: movement.bankAccount,
@@ -180,6 +195,7 @@ export async function PUT(request: Request) {
         },
         create: {
           id: movement.movementId,
+          displayId,
           bankAccountId: bankAccount?.id,
           bank: movement.bank,
           bankAccountNumber: movement.bankAccount,
@@ -295,7 +311,7 @@ export async function PUT(request: Request) {
       },
       tx
     );
-  });
+  }, { timeout: 30000, maxWait: 15000 });
 
   return NextResponse.json({ ok: true });
 }
@@ -325,28 +341,78 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: 'Datos invalidos' }, { status: 400 });
   }
 
-  const auditEvents: AuditEvent[] = [];
-  await prisma.$transaction(async (tx) => {
-    for (const movement of parsed.data.movements) {
-      await applyMovement(tx, movement, session.user.id, auditEvents);
+  for (const movement of parsed.data.movements) {
+    const balanceError = movementBalanceError(movement);
+    if (balanceError) {
+      return NextResponse.json({ error: balanceError }, { status: 400 });
     }
-    for (const event of auditEvents) {
-      await auditAction(
-        {
-          actorId: session.user.id,
-          action: event.action,
-          module: 'Cartola',
-          entityType: 'CartolaMovement',
-          entityId: event.entityId,
-          before: event.before,
-          after: event.after,
-          metadata: event.metadata,
-          request,
+  }
+
+  // Reintenta ante colisión de unicidad en displayId (P2002): dos escrituras
+  // casi simultáneas podrían calcular el mismo correlativo. Reintentar recalcula
+  // el correlativo con el estado ya persistido por la otra transacción.
+  const MAX_ATTEMPTS = 3;
+  for (let attempt = 1; ; attempt++) {
+    const auditEvents: AuditEvent[] = [];
+    try {
+      await prisma.$transaction(
+        async (tx) => {
+          // Un solo cálculo del correlativo por lote (no por movimiento).
+          const allocate = createDisplayIdAllocator(tx);
+          for (const movement of parsed.data.movements) {
+            await applyMovement(tx, movement, session.user.id, auditEvents, allocate);
+          }
+          for (const event of auditEvents) {
+            await auditAction(
+              {
+                actorId: session.user.id,
+                action: event.action,
+                module: 'Cartola',
+                entityType: 'CartolaMovement',
+                entityId: event.entityId,
+                before: event.before,
+                after: event.after,
+                metadata: event.metadata,
+                request,
+              },
+              tx
+            );
+          }
         },
-        tx
+        // RDS remoto: damos margen para lotes grandes y evitamos el P2028
+        // (timeout por defecto de 5s) sin dejarlo colgado indefinidamente.
+        { timeout: 30000, maxWait: 15000 }
+      );
+      break;
+    } catch (error) {
+      const isDisplayIdCollision =
+        error instanceof Prisma.PrismaClientKnownRequestError &&
+        error.code === 'P2002' &&
+        String((error.meta as { target?: unknown } | undefined)?.target ?? '').includes(
+          'displayId'
+        );
+      if (isDisplayIdCollision && attempt < MAX_ATTEMPTS) continue;
+      if (isDisplayIdCollision) {
+        return NextResponse.json(
+          { error: 'Conflicto al asignar el código visible. Reintenta la sincronización.' },
+          { status: 409 }
+        );
+      }
+      // Error inesperado: devolvemos el detalle (en vez de un 500 opaco) para
+      // poder diagnosticar. Incluye código Prisma (Pxxxx) y mensaje.
+      const detail =
+        error instanceof Prisma.PrismaClientKnownRequestError
+          ? `[${error.code}] ${error.message}`
+          : error instanceof Error
+            ? error.message
+            : String(error);
+      console.error('[cartola POST] error al sincronizar:', error);
+      return NextResponse.json(
+        { error: `Error al guardar en base: ${detail}` },
+        { status: 500 }
       );
     }
-  });
+  }
 
   return NextResponse.json({ ok: true, count: parsed.data.movements.length }, { status: 201 });
 }

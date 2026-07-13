@@ -199,3 +199,24 @@ En sesiones previas se implementó (backend, con typecheck; pendiente de QA en v
 **Lo que falta (eficiencia/escala):** hoy el frontend reenvía **todo el conjunto cargado** en cada cambio (debounce 600 ms) y el servidor, por cada registro, borra y recrea sus items/pagos. Editar un solo documento reprocesa los N documentos. No escala a miles.
 
 **Mejora futura:** dirty-tracking en el frontend (enviar solo el registro creado/editado vía `POST`, y `DELETE` explícito al anular), eliminando el reenvío completo. Cartola ya tiene los endpoints `POST`/`DELETE` y el mecanismo no destructivo; Cobranza/Recaudación seguirían el mismo patrón. Conviene hacerlo con la app corriendo para poder probar los flujos financieros end-to-end.
+
+## Revisión del modelo de cierre (por rango) — reemplaza el modelo por mes
+
+El cierre no es por mes calendario sino por **rango de fechas** (inicio/fin), y genera un **cierre con id único** que etiqueta las transacciones. "Asiento"/exportación SAP queda **pendiente** (sin formato aún).
+
+**Entidades (Fase B, ya en el esquema):**
+- `Closure`: id único, `dateFrom`/`dateTo`, `createdBy`, `createdAt`, y snapshot (`totalCount`, `identifiedCount`, `pendingCount`, montos). Permite cierres parciales (semanal/quincenal) y múltiples en el tiempo.
+- `ClosureItem`: detalle por movimiento en ese cierre (para auditoría): `closeState` (CerradoParcial/CerradoDefinitivo), `identificationType` (categoría), `amount`, `originYear/Month`, `carriedFromClosureId` (si finaliza un arrastrado).
+- `CartolaMovement.finalizedInClosureId`: el cierre donde quedó CerradoDefinitivo.
+
+**Estados del movimiento:** `Abierto` → `CerradoParcial` (tomado en un cierre pero aún sin identificar) → `CerradoDefinitivo` (identificado, dentro o después del periodo).
+
+**Algoritmo de "Generar cierre" (Fase C, propuesto):**
+1. Incluye: movimientos con fecha en [dateFrom, dateTo] que están `Abierto`, MÁS todos los `CerradoParcial` de cierres anteriores (arrastrados), sin importar su fecha.
+2. Estado en este cierre por movimiento: identificado (FullyAllocated) → `CerradoDefinitivo`; si no → `CerradoParcial`.
+3. Crea `Closure` (id único + snapshot) y un `ClosureItem` por movimiento (con `carriedFromClosureId` si venía Parcial de otro cierre).
+4. Actualiza cada movimiento: `closeState` nuevo; si Definitivo, `finalizedInClosureId = este cierre`.
+
+**Reporte / resumen:** por cierre, resumen por categoría (tipo de identificación) de identificados + "por identificar" (pendientes); y para arrastrados que ahora se identifican, reflejar **salida negativa en "por identificar" y entrada positiva en la categoría** (reclasificación).
+
+**Bloqueo:** un movimiento `CerradoDefinitivo` no se edita más en Cartola; un `CerradoParcial` sí (para poder identificarlo en cierres posteriores).

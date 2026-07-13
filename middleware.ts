@@ -1,7 +1,10 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { withAuth } from 'next-auth/middleware';
 
-import { isAuthEnabled } from '@/lib/auth';
+// IMPORTANTE: el middleware corre en Edge Runtime, que NO soporta el módulo
+// `crypto` de Node. Por eso NO debemos importar desde '@/lib/auth' (arrastra
+// lib/user-store.ts, que usa scrypt/randomBytes). Leemos la env var directo.
+const isAuthEnabled = process.env.AUTH_ENABLED === 'true';
 
 const authMiddleware = withAuth({
   callbacks: {

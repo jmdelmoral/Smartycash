@@ -122,6 +122,39 @@ export function UserManagement() {
     }
   };
 
+  const onResetPassword = async (userId: string) => {
+    if (
+      !window.confirm(
+        '¿Restablecer la contraseña de este usuario? Se generará una temporal y deberá cambiarla al ingresar.'
+      )
+    ) {
+      return;
+    }
+    setUserFormError(null);
+    setIsSubmitting(true);
+    try {
+      const response = await fetch('/api/users/reset-password', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id: userId }),
+      });
+      const data = await response.json();
+      if (!response.ok) {
+        throw new Error(data.error || 'No se pudo restablecer la contraseña.');
+      }
+      setUsers((prev) => prev.map((u) => (u.id === userId ? { ...data.user } : u)));
+      setGeneratedPasswordMessage(
+        `Contraseña restablecida para ${data.user.email}. Temporal: ${data.temporaryPassword} — el usuario deberá cambiarla al ingresar. (Cuando se integre el correo, se enviará por email en vez de mostrarse.)`
+      );
+    } catch (error) {
+      setUserFormError(
+        error instanceof Error ? error.message : 'No se pudo restablecer la contraseña.'
+      );
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
   return (
     <div className="rounded-lg border bg-white p-4">
       <h3 className="mb-3 text-lg font-semibold">Módulo de Usuarios</h3>
@@ -204,9 +237,25 @@ export function UserManagement() {
                     </Badge>
                   </td>
                   <td className="px-4 py-3">
-                    <Button variant="outline" size="sm" onClick={() => onToggleUser(user.id)}>
-                      {user.isActive ? 'Desactivar' : 'Activar'}
-                    </Button>
+                    <div className="flex items-center gap-1.5">
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        className="h-7 px-2 text-xs whitespace-nowrap"
+                        onClick={() => onToggleUser(user.id)}
+                      >
+                        {user.isActive ? 'Desactivar' : 'Activar'}
+                      </Button>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        className="h-7 px-2 text-xs whitespace-nowrap"
+                        onClick={() => onResetPassword(user.id)}
+                        disabled={isSubmitting}
+                      >
+                        Restablecer clave
+                      </Button>
+                    </div>
                   </td>
                 </tr>
               ))

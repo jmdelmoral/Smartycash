@@ -1,7 +1,7 @@
 'use client';
 
 import { signOut, useSession } from 'next-auth/react';
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import * as XLSX from 'xlsx';
 import { z } from 'zod';
 
@@ -9,6 +9,7 @@ import { BankAccountManagement } from '@/components/BankAccountManagement';
 import { BankStatementManagement } from '@/components/BankStatementManagement';
 import { ClientManagement } from '@/components/ClientManagement';
 import { CobranzaManagement } from '@/components/CobranzaManagement';
+import { ContabilidadManagement } from '@/components/ContabilidadManagement';
 import { RecaudacionManagement } from '@/components/RecaudacionManagement';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -70,12 +71,20 @@ export default function HomePage() {
   const [newPasswordConfirm, setNewPasswordConfirm] = useState('');
   const [passwordError, setPasswordError] = useState<string | null>(null);
   const [masterDataError, setMasterDataError] = useState<string | null>(null);
+  const [businessLoading, setBusinessLoading] = useState(true);
   const businessDataLoadedRef = useRef(false);
   // Baseline of IDs the client has loaded, per module. Sent as knownIds so the
   // server only reverses/annuls records this client actually knew about.
   const knownMovementIdsRef = useRef<Set<string>>(new Set());
   const knownRequestIdsRef = useRef<Set<string>>(new Set());
   const knownDocIdsRef = useRef<Set<string>>(new Set());
+  // Sincronización de Cartola: evita POSTs solapados (que colisionarían en el
+  // displayId único) y reintenta si llegaron cambios mientras había uno en vuelo.
+  const cartolaSyncInFlightRef = useRef(false);
+  const cartolaSyncDirtyRef = useRef(false);
+  // Cuando refrescamos movimientos desde el servidor tras un guardado, saltamos
+  // UNA re-sincronización para no crear un bucle sync -> refetch -> sync.
+  const suppressCartolaSyncRef = useRef(false);
 
   // Estado global de cuentas bancarias permitidas (Simulado)
   const [bankAccounts, setBankAccounts] = useState<BankAccount[]>([]);
@@ -85,6 +94,9 @@ export default function HomePage() {
   // Lifting movements state to synchronize Cartola and Recaudación
   */
   const [movements, setMovements] = useState<CartolaMovement[]>([]);
+  // Referencia siempre actualizada de los movimientos (para el re-sync diferido).
+  const movementsRef = useRef<CartolaMovement[]>(movements);
+  movementsRef.current = movements;
 
   // Lifting Clients state
   const [clients, setClients] = useState<Client[]>([]);
@@ -158,6 +170,7 @@ export default function HomePage() {
 
     const loadMasterData = async () => {
       setMasterDataError(null);
+      setBusinessLoading(true);
       try {
         const [
           bankAccountsResponse,
@@ -212,6 +225,8 @@ export default function HomePage() {
         setMasterDataError(
           error instanceof Error ? error.message : 'No fue posible cargar datos maestros.'
         );
+      } finally {
+        setBusinessLoading(false);
       }
     };
 
@@ -308,21 +323,82 @@ export default function HomePage() {
     );
   };
 
-  useEffect(() => {
-    if (!businessDataLoadedRef.current || currentStatus !== 'authenticated') return;
-    const timeout = window.setTimeout(() => {
-      if (movements.length === 0) return;
+  const syncCartola = useCallback(async (payload: CartolaMovement[]) => {
+    if (payload.length === 0) return;
+    // Un solo POST en vuelo a la vez: dos concurrentes podrían calcular el
+    // mismo correlativo de displayId y colisionar en la restricción única.
+    if (cartolaSyncInFlightRef.current) {
+      cartolaSyncDirtyRef.current = true;
+      return;
+    }
+    cartolaSyncInFlightRef.current = true;
+    try {
       // Upsert NO destructivo de los movimientos en memoria. Las reversiones
       // (eliminar) se manejan aparte con DELETE desde la vista de Cartola.
-      fetch('/api/cartola/movements', {
+      const res = await fetch('/api/cartola/movements', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ movements }),
-      }).catch(() => setMasterDataError('No fue posible sincronizar Cartola.'));
+        body: JSON.stringify({ movements: payload }),
+      });
+      // IMPORTANTE: fetch NO lanza en respuestas 4xx/5xx, así que hay que
+      // revisar res.ok explícitamente. Antes esto se ignoraba y los cambios
+      // rechazados por el servidor se perdían en silencio al recargar.
+      if (!res.ok) {
+        const data = (await res.json().catch(() => ({}))) as { error?: string };
+        setMasterDataError(
+          `Sincronización de Cartola: ${data.error ?? 'no fue posible guardar.'} Tus últimos cambios NO se guardaron; corrige e inténtalo de nuevo antes de recargar.`
+        );
+      } else {
+        // Limpia solo un error PREVIO de sincronización de Cartola (no toca
+        // errores de otros módulos que comparten este estado).
+        setMasterDataError((prev) =>
+          prev && prev.startsWith('Sincronización de Cartola:') ? null : prev
+        );
+        // Refresca desde el servidor para reflejar campos calculados por el
+        // backend (código visible displayId, estado). Evita tener que recargar
+        // la página a mano para ver el CL-BAN-...
+        try {
+          const refetch = await fetch('/api/cartola/movements', { cache: 'no-store' });
+          if (refetch.ok) {
+            const fresh = (await refetch.json()) as { movements: CartolaMovement[] };
+            suppressCartolaSyncRef.current = true;
+            knownMovementIdsRef.current = new Set(
+              (fresh.movements ?? []).map((m) => m.movementId)
+            );
+            setMovements(fresh.movements ?? []);
+          }
+        } catch {
+          /* refresh best-effort: si falla, los datos locales siguen visibles */
+        }
+      }
+    } catch {
+      setMasterDataError(
+        'Sincronización de Cartola: error de red. Tus últimos cambios NO se guardaron; no recargues hasta reintentar.'
+      );
+    } finally {
+      cartolaSyncInFlightRef.current = false;
+      // Si llegaron cambios mientras había un POST en vuelo, re-sincroniza el
+      // estado más reciente para no perderlos.
+      if (cartolaSyncDirtyRef.current) {
+        cartolaSyncDirtyRef.current = false;
+        void syncCartola(movementsRef.current);
+      }
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!businessDataLoadedRef.current || currentStatus !== 'authenticated') return;
+    // Este cambio de `movements` vino de un refetch post-guardado: no re-sincronizar.
+    if (suppressCartolaSyncRef.current) {
+      suppressCartolaSyncRef.current = false;
+      return;
+    }
+    const timeout = window.setTimeout(() => {
+      void syncCartola(movementsRef.current);
     }, 600);
 
     return () => window.clearTimeout(timeout);
-  }, [currentStatus, movements]);
+  }, [currentStatus, movements, syncCartola]);
 
   useEffect(() => {
     if (!businessDataLoadedRef.current || currentStatus !== 'authenticated') return;
@@ -515,8 +591,10 @@ export default function HomePage() {
               ) : (
                 <BankStatementManagement
                   availableAccounts={activeBankAccounts}
+                  clients={activeClients}
                   movements={movements}
                   setMovements={setMovements}
+                  loading={businessLoading}
                 />
               )}
             </TabsContent>
@@ -535,9 +613,13 @@ export default function HomePage() {
             </TabsContent>
 
             <TabsContent value="contabilidad">
-              <Card className="p-4 text-sm text-slate-700">
-                Módulo de Contabilidad listo para conciliaciones y análisis financiero.
-              </Card>
+              {!canAccessTab('contabilidad') ? (
+                <p className="rounded-md border border-amber-200 bg-amber-50 p-3 text-sm text-amber-700">
+                  Tu perfil no tiene acceso a Contabilidad.
+                </p>
+              ) : (
+                <ContabilidadManagement />
+              )}
             </TabsContent>
 
             <TabsContent value="cobranza-credito">

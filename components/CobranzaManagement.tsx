@@ -4,6 +4,7 @@ import { useMemo, useState } from 'react';
 import * as XLSX from 'xlsx';
 
 import { Badge } from '@/components/ui/badge';
+import { formatDate } from '@/lib/format';
 import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
 import {
@@ -177,8 +178,8 @@ export function CobranzaManagement({
       'MontoPNR',
       'MontoTotal',
     ].join(';');
-    const sample = 'Factura;FAC-1001;2024-05-21;Chile;CLI-1;ABC123;50000;50000';
-    const blob = new Blob([`${headers}\n${sample}\n`], { type: 'text/csv;charset=utf-8;' });
+    const sample = 'Factura;FAC-1001;21/05/2024;Chile;CLI-1;ABC123;50000;50000';
+    const blob = new Blob(['\uFEFF' + `${headers}\n${sample}\n`], { type: 'text/csv;charset=utf-8;' });
     const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
     link.href = url;
@@ -222,24 +223,70 @@ export function CobranzaManagement({
         .map((docId) => {
           const group = groups[docId];
           const first = group[0];
-          return {
-            id: String(docId),
-            type: first.Tipo as CobranzaDocumentType,
-            date: String(first.Fecha),
-            country: String(first.Pais),
-            clientId: String(first.ClienteID),
-            totalAmount: Number(first.MontoTotal),
-            pendingAmount: Number(first.MontoTotal),
-            status: 'Pendiente',
-            payments: [],
-            subDocuments: group
-              .filter((r: any) => r.PNR && String(r.PNR).toLowerCase() !== 'undefined')
-              .map((r: any) => ({
+
+          const tipo = String(first.Tipo ?? '').trim();
+          if (!['Factura', 'Nota de cobro', 'Nota de Crédito'].includes(tipo)) {
+            throw new Error(
+              `Documento ${docId}: Tipo inválido "${tipo}". Use Factura, Nota de cobro o Nota de Crédito.`
+            );
+          }
+
+          const totalAmount = Number(first.MontoTotal);
+          if (!Number.isFinite(totalAmount) || totalAmount <= 0) {
+            throw new Error(`Documento ${docId}: MontoTotal inválido.`);
+          }
+
+          const clientId = String(first.ClienteID);
+          if (!clients.some((c) => c.id === clientId)) {
+            throw new Error(`Documento ${docId}: ClienteID ${clientId} no existe.`);
+          }
+
+          // Fecha: acepta dd/mm/yyyy (o yyyy-mm-dd) y normaliza a ISO.
+          const rawFecha = String(first.Fecha ?? '').trim();
+          const ymd = /^(\d{4})-(\d{2})-(\d{2})$/.exec(rawFecha);
+          const dmy = /^(\d{2})[/-](\d{2})[/-](\d{4})$/.exec(rawFecha);
+          let isoDate: string;
+          if (ymd) isoDate = `${ymd[1]}-${ymd[2]}-${ymd[3]}`;
+          else if (dmy) isoDate = `${dmy[3]}-${dmy[2]}-${dmy[1]}`;
+          else throw new Error(`Documento ${docId}: fecha inválida (usa dd/mm/yyyy).`);
+
+          // Detalle (PNR) OPCIONAL. Si se incluye, cada PNR debe ser válido y sumar el total.
+          const subDocuments = group
+            .filter((r: any) => r.PNR && String(r.PNR).toLowerCase() !== 'undefined')
+            .map((r: any) => {
+              const amt = Number(r.MontoPNR);
+              if (!Number.isFinite(amt) || amt <= 0) {
+                throw new Error(`Documento ${docId}: MontoPNR inválido para PNR ${r.PNR}.`);
+              }
+              return {
                 id: `SUB-${Math.random()}`,
                 reference: String(r.PNR).toUpperCase(),
-                amount: Number(r.MontoPNR),
+                amount: amt,
                 detail: 'Carga Masiva Cobranza',
-              })),
+              };
+            });
+
+          if (subDocuments.length > 0) {
+            const round2 = (n: number) => Math.round(n * 100) / 100;
+            const pnrSum = round2(subDocuments.reduce((acc: number, sd: { amount: number }) => acc + sd.amount, 0));
+            if (Math.abs(pnrSum - round2(totalAmount)) > 0.01) {
+              throw new Error(
+                `Documento ${docId}: la suma de PNR (${pnrSum}) no cuadra con el total (${round2(totalAmount)}).`
+              );
+            }
+          }
+
+          return {
+            id: String(docId),
+            type: tipo as CobranzaDocumentType,
+            date: isoDate,
+            country: String(first.Pais),
+            clientId,
+            totalAmount,
+            pendingAmount: totalAmount,
+            status: 'Pendiente',
+            payments: [],
+            subDocuments,
           };
         });
 
@@ -427,12 +474,12 @@ export function CobranzaManagement({
         Cliente_SAP_BP: client?.sapBP || 'N/A',
         Documento_ID: d.id,
         Tipo_Documento: d.type,
-        Fecha_Emision: d.date,
+        Fecha_Emision: formatDate(d.date),
         Monto_Total: isNC ? -d.totalAmount : d.totalAmount,
         Monto_Pendiente_a_Corte: isNC ? -pendingAtCutoff : pendingAtCutoff,
         Estado_a_Corte: statusAtCutoff,
         PNRs: d.subDocuments.map((s) => s.reference).join(', '),
-        Pagos_Asociados: d.payments.map((p) => `${p.bank} ${p.date} $${p.amount}`).join('; '),
+        Pagos_Asociados: d.payments.map((p) => `${p.bank} ${formatDate(p.date)} $${p.amount}`).join('; '),
       };
     });
 
@@ -459,7 +506,7 @@ export function CobranzaManagement({
       return {
         Documento_ID: d.id,
         Tipo: d.type,
-        Fecha: d.date,
+        Fecha: formatDate(d.date),
         Pais: d.country,
         Cliente: client?.name || d.clientId,
         Navitaire: client?.navitaireCode || '',
@@ -907,7 +954,7 @@ export function CobranzaManagement({
                     <td className="px-4 py-4 font-mono text-[11px] text-slate-500">{d.id}</td>
                     <td className="px-4 py-4">
                       <div className="font-semibold text-slate-700">{d.type}</div>
-                      <div className="text-[10px] text-slate-400">{d.date}</div>
+                      <div className="text-[10px] text-slate-400">{formatDate(d.date)}</div>
                     </td>
                     <td className="px-4 py-4">
                       <div className="font-medium">
@@ -1100,7 +1147,7 @@ export function CobranzaManagement({
                     <div>
                       <div className="font-bold text-emerald-800">{p.bank}</div>
                       <div className="text-slate-500">
-                        Fecha: {p.date} | ID: {p.movementId}
+                        Fecha: {formatDate(p.date)} | ID: {p.movementId}
                       </div>
                     </div>
                     <div className="text-right font-bold text-emerald-700 text-sm">
@@ -1186,7 +1233,7 @@ export function CobranzaManagement({
                         const available = m.amount - used;
                         return (
                           <option key={m.movementId} value={m.movementId}>
-                            {m.date} - {m.bank} (Disp: ${available.toLocaleString()} / Total: $
+                            {formatDate(m.date)} - {m.bank} (Disp: ${available.toLocaleString()} / Total: $
                             {m.amount.toLocaleString()})
                           </option>
                         );
