@@ -50,3 +50,6 @@ params-prod.json
 template-dev.json
 template-prod.json
 Makefile
+
+# Prisma generated client (se regenera en build vía prebuild: prisma generate)
+/lib/generated

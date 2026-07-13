@@ -1,6 +1,9 @@
 generator client {
-  provider = "prisma-client-js"
-  output   = "../lib/generated/prisma"
+  provider      = "prisma-client-js"
+  output        = "../lib/generated/prisma"
+  // "native" cubre el entorno local; "linux-musl-openssl-3.0.x" es el engine que
+  // necesita la imagen Docker (node:alpine / musl). Se genera con `prisma generate`.
+  binaryTargets = ["native", "linux-musl-openssl-3.0.x"]
 }
 
 datasource db {
@@ -70,10 +73,13 @@ model VerificationToken {
 
 model BankAccount {
   id            String   @id @default(cuid())
+  displayId     String   @unique
   bankName      String
   accountNumber String
   country       String
   currency      String   @default("CLP")
+  taxId         String?
+  legalName     String?
   isActive      Boolean  @default(true)
   createdAt     DateTime @default(now())
   updatedAt     DateTime @updatedAt
@@ -85,10 +91,12 @@ model BankAccount {
 
   @@unique([bankName, accountNumber, country])
   @@index([accountNumber])
+  @@index([country])
 }
 
 model Client {
   id            String   @id @default(cuid())
+  appCode       String   @unique
   name          String
   taxId         String   @unique
   navitaireCode String?  @unique
@@ -158,6 +166,12 @@ model CartolaMovement {
   extraFields        Json?
   identificationType MainIdentificationType @default(SinIdentificar)
   status             MovementStatus         @default(Unidentified)
+  // Fase A — ciclo de vida de cierre contable (consumido por el futuro modulo Contabilidad).
+  closeState         MovementCloseState     @default(Abierto)
+  validatedAt        DateTime? // cuando el movimiento quedo finalmente identificado/validado
+  asientoContableAt  DateTime? // fecha del asiento contable
+  originYear         Int? // ano del periodo de origen (materializado desde `date`)
+  originMonth        Int? // mes del periodo de origen (1-12)
   ownerUserId        String?
   ownerUser          User?                  @relation("CartolaMovementOwner", fields: [ownerUserId], references: [id], onDelete: SetNull)
   createdAt          DateTime               @default(now())
@@ -171,6 +185,8 @@ model CartolaMovement {
   @@index([bankAccountNumber])
   @@index([status])
   @@index([identificationType])
+  @@index([closeState])
+  @@index([originYear, originMonth])
 }
 
 model CartolaMovementAllocation {
@@ -211,11 +227,15 @@ model CollectionRequest {
   clientId             String
   client               Client           @relation(fields: [clientId], references: [id])
   supportFileId        String?
-  supportFile          SupportFile?     @relation(fields: [supportFileId], references: [id], onDelete: SetNull)
+  supportFile          SupportFile?     @relation("PrimarySupport", fields: [supportFileId], references: [id], onDelete: SetNull)
+  attachments          SupportFile[]    @relation("RequestAttachments")
   status               CollectionStatus @default(Pendiente)
   associatedMovementId String?
   associatedMovement   CartolaMovement? @relation(fields: [associatedMovementId], references: [id], onDelete: SetNull)
   rejectionComment     String?
+  authorizationCode    String? // codigo de autorizacion (alfanumerico) del comprobante bancario
+  infoRequestComment   String? // comentario de Recaudacion al solicitar SWIFT/MT103
+  infoRequestedAt      DateTime? // cuando Recaudacion solicito informacion adicional
   createdById          String?
   createdBy            User?            @relation("CollectionRequestCreatedBy", fields: [createdById], references: [id], onDelete: SetNull)
   reviewedById         String?
@@ -230,6 +250,7 @@ model CollectionRequest {
   @@index([clientId])
   @@index([status])
   @@index([associatedMovementId])
+  @@index([authorizationCode])
 }
 
 model CollectionRequestItem {
@@ -247,16 +268,32 @@ model CollectionRequestItem {
 }
 
 model SupportFile {
-  id                 String              @id @default(cuid())
-  fileName           String
-  mimeType           String?
-  sizeBytes          Int?
-  storageKey         String?
-  checksum           String?
-  uploadedById       String?
-  uploadedBy         User?               @relation("SupportFileUploadedBy", fields: [uploadedById], references: [id], onDelete: SetNull)
-  createdAt          DateTime            @default(now())
-  collectionRequests CollectionRequest[]
+  id                  String              @id @default(cuid())
+  fileName            String
+  mimeType            String?
+  sizeBytes           Int?
+  storageKey          String?
+  checksum            String?
+  backend             StorageBackend      @default(Db)
+  collectionRequestId String?
+  collectionRequest   CollectionRequest?  @relation("RequestAttachments", fields: [collectionRequestId], references: [id], onDelete: Cascade)
+  uploadedById        String?
+  uploadedBy          User?               @relation("SupportFileUploadedBy", fields: [uploadedById], references: [id], onDelete: SetNull)
+  createdAt           DateTime            @default(now())
+  collectionRequests  CollectionRequest[] @relation("PrimarySupport")
+
+  @@index([collectionRequestId])
+}
+
+enum StorageBackend {
+  Db
+  S3
+}
+
+model FileBlob {
+  id        String   @id
+  data      Bytes
+  createdAt DateTime @default(now())
 }
 
 model CobranzaDocument {
@@ -386,6 +423,12 @@ enum MovementStatus {
   Reversed
 }
 
+enum MovementCloseState {
+  Abierto
+  CerradoParcial
+  CerradoDefinitivo
+}
+
 enum TraceModule {
   Cartola
   Recaudacion
@@ -402,6 +445,7 @@ enum CollectionStatus {
   Aprobado
   Rechazado
   Anulado
+  InformacionSolicitada
 }
 
 enum CobranzaDocumentType {

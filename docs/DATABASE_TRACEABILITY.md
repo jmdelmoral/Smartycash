@@ -6,6 +6,8 @@ Este modelo usa una sola base relacional con tablas separadas por dominio. La se
 
 - Usuarios y acceso: `User`, `Account`, `Session`, `VerificationToken`.
 - Maestros compartidos: `Client`, `BankAccount`.
+  - `Client.appCode` es el ID visible del cliente en el aplicativo, con formato `CLI-000001`.
+  - `BankAccount.displayId` es el ID visible de la cuenta bancaria, con formato por pais, por ejemplo `CL-CTA-000001`.
 - Venta y referencias comerciales: `SaleReference`.
 - Cartola bancaria: `BankStatementImport`, `CartolaMovement`, `CartolaMovementAllocation`.
 - Recaudacion: `CollectionRequest`, `CollectionRequestItem`, `SupportFile`.
@@ -34,7 +36,10 @@ Toda accion relevante debe crear un registro en `AuditLog` con:
 
 ## Migraciones
 
-- `20260609121000_add_business_traceability_tables` agrega tablas de negocio a una base que ya tiene autenticacion.
 - `20260609120000_business_traceability_foundation` es una referencia para crear una base limpia desde cero.
+- `20260615100000_add_visible_master_codes` agrega IDs visibles para clientes/cuentas y datos extendidos de cuentas bancarias.
 
-Para este proyecto, la migracion incremental ya fue aplicada a la base actual.
+## Pendientes Externos
+
+- Envio de correo al crear/restablecer usuarios: queda pendiente de configurar credenciales SMTP o un proveedor externo de correo.
+- El flujo recomendado es enviar un enlace de definicion/restablecimiento de contrasena, no una contrasena plana por correo.

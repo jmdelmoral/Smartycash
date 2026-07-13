@@ -3,43 +3,36 @@ import { withAuth } from 'next-auth/middleware';
 
 import { isAuthEnabled } from '@/lib/auth';
 
-const authMiddleware = withAuth(
-  // NOTE: `withAuth` augments the `Request` object with `req.nextauth.token`
-  function middleware(req) {
-    console.log('🔐 Middleware executed for:', req.nextUrl.pathname);
-    console.log('🔐 Token exists:', !!req.nextauth.token);
+const authMiddleware = withAuth({
+  callbacks: {
+    authorized: ({ token, req }) => {
+      const publicPaths = ['/auth', '/health', '/recursos'];
+
+      const isPublic = publicPaths.some((path) => req.nextUrl.pathname.startsWith(path));
+
+      if (isPublic) {
+        return true;
+      }
+
+      // For all other routes, require a token
+      return !!token;
+    },
   },
-  {
-    callbacks: {
-      authorized: ({ token, req }) => {
-        const publicPaths = ['/auth', '/health', '/recursos'];
-
-        const isPublic = publicPaths.some((path) => req.nextUrl.pathname.startsWith(path));
-
-        if (isPublic) {
-          return true;
-        }
-
-        // For all other routes, require a token
-        return !!token;
-      },
-    },
-    pages: {
-      signIn: '/auth/signin',
-      error: '/auth/error',
-    },
-  }
-);
+  pages: {
+    signIn: '/auth/signin',
+    error: '/auth/error',
+  },
+});
 
 export default function middleware(req: NextRequest) {
   if (!isAuthEnabled) {
-    // If auth is disabled, don't do anything
+    // Auth disabled: let every request through without invoking NextAuth.
     return NextResponse.next();
   }
 
-  // If auth is enabled, run the auth middleware
-
-  // @ts-expect-error
+  // withAuth's handler is typed for NextRequestWithAuth; passing NextRequest is
+  // safe for our usage (the matcher below scopes which paths reach this point).
+  // @ts-expect-error - NextRequest vs NextRequestWithAuth signature mismatch
   return authMiddleware(req);
 }
 

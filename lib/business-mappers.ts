@@ -19,12 +19,15 @@ import type {
 } from '@/types';
 
 type CartolaWithAllocations = PrismaCartolaMovement & {
-  allocations: CartolaMovementAllocation[];
+  allocations: (CartolaMovementAllocation & {
+    saleReference: { reference: string } | null;
+  })[];
 };
 
 type CollectionWithItems = PrismaCollectionRequest & {
   supportFile: { fileName: string } | null;
   items: CollectionRequestItem[];
+  attachments?: { id: string; fileName: string; mimeType: string | null }[];
 };
 
 type CobranzaWithItemsAndPayments = PrismaCobranzaDocument & {
@@ -52,7 +55,7 @@ export function toDateInput(value: Date): string {
 export function uiIdentificationToPrisma(value: MainIdentificationType | string) {
   if (value === 'Adquiriente') return 'Adquiriente';
   if (value === 'GC') return 'GC';
-  if (value === 'Cobranza crÃ©dito' || value === 'Cobranza crédito') return 'CobranzaCredito';
+  if (value === 'Cobranza crédito') return 'CobranzaCredito';
   return 'SinIdentificar';
 }
 
@@ -74,7 +77,7 @@ export function movementStatusFromDocuments(
 
 export function moduleFromIdentification(value: MainIdentificationType | string) {
   if (value === 'GC') return 'Recaudacion';
-  if (value === 'Cobranza crÃ©dito' || value === 'Cobranza crédito') return 'Cobranza';
+  if (value === 'Cobranza crédito') return 'Cobranza';
   return 'Cartola';
 }
 
@@ -83,7 +86,7 @@ export function cartolaToUi(movement: CartolaWithAllocations): CartolaMovement {
     .filter((allocation) => !allocation.voidedAt)
     .map((allocation) => ({
       id: allocation.sourceEntityId,
-      reference: allocation.saleReferenceId ?? allocation.sourceEntityId,
+      reference: allocation.saleReference?.reference ?? allocation.sourceEntityId,
       amount: Number(allocation.amount),
       detail: allocation.detail ?? '',
     }));
@@ -112,9 +115,18 @@ export function collectionToUi(request: CollectionWithItems): CollectionRequest 
     amount: Number(request.amount),
     clientId: request.clientId,
     supportFileName: request.supportFile?.fileName ?? '',
+    authorizationCode: request.authorizationCode ?? undefined,
     status: request.status as CollectionStatus,
     rejectionComment: request.rejectionComment ?? undefined,
     associatedMovementId: request.associatedMovementId ?? undefined,
+    infoRequestComment: request.infoRequestComment ?? undefined,
+    infoRequestedAt: request.infoRequestedAt ? request.infoRequestedAt.toISOString() : undefined,
+    attachments:
+      request.attachments?.map((a) => ({
+        id: a.id,
+        fileName: a.fileName,
+        mimeType: a.mimeType ?? undefined,
+      })) ?? [],
     documents: request.items.map((item) => ({
       id: item.id,
       reference: item.reference,

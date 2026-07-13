@@ -104,7 +104,7 @@ function generateId(prefix: string): string {
   const random = Math.random().toString(36).slice(2, 8).toUpperCase();
   return `${prefix}-${Date.now()}-${random}`;
 }
-const ITEMS_PER_PAGE = 100;
+const ITEMS_PER_PAGE = 20; // filas por página en la tabla de Cartola (ajústalo si quieres)
 
 export function BankStatementManagement({
   availableAccounts,
@@ -438,6 +438,12 @@ export function BankStatementManagement({
     if (selectedMovementId === movementId) {
       setSelectedMovementId(null);
     }
+    // Reversa explícita en el servidor (reemplaza la antigua reversión por omisión).
+    void fetch('/api/cartola/movements', {
+      method: 'DELETE',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ movementIds: [movementId] }),
+    }).catch(() => setUploadError('No fue posible reversar el movimiento en el servidor.'));
   };
 
   const onOpenDocumentEditor = (movementId: string) => {

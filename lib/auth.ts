@@ -32,12 +32,25 @@ const isKeycloakConfigured =
   !!(process.env.KEYCLOAK_ID && process.env.KEYCLOAK_SECRET && process.env.KEYCLOAK_ISSUER);
 
 /**
+ * Secret used to sign session JWTs. There is NO hardcoded fallback on purpose:
+ * a shared/default secret would let anyone forge valid sessions. When auth is
+ * enabled the secret is mandatory and the app fails fast if it is missing.
+ */
+const authSecret = process.env.NEXTAUTH_SECRET;
+if (isAuthEnabled && !authSecret) {
+  throw new Error(
+    'NEXTAUTH_SECRET no está definido. Genera uno (por ejemplo `openssl rand -base64 32`) ' +
+      'y configúralo antes de habilitar la autenticación (AUTH_ENABLED=true).'
+  );
+}
+
+/**
  * Configuration options for NextAuth.js.
  * This is the central place for all authentication configurations.
  * @see https://next-auth.js.org/configuration/options
  */
 export const authOptions: NextAuthOptions = {
-  secret: process.env.NEXTAUTH_SECRET ?? 'dev-smartycash-secret-change-this',
+  secret: authSecret,
   adapter: PrismaAdapter(prisma),
   session: {
     strategy: 'jwt',
@@ -149,5 +162,6 @@ export const authOptions: NextAuthOptions = {
       return session;
     },
   },
-  debug: process.env.NODE_ENV === 'development',
+  // Opt-in explícito para evitar logs verbosos de auth por defecto (incl. en dev).
+  debug: process.env.NEXTAUTH_DEBUG === 'true',
 };

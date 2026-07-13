@@ -29,23 +29,38 @@ export type UserRecord = {
 
 export type BankAccount = {
   id: string;
+  displayId?: string;
   bankName: string;
   accountNumber: string;
   country: string;
   currency?: string;
+  taxId?: string | null;
+  legalName?: string | null;
   isActive?: boolean;
 };
 
 export type Client = {
   id: string;
+  appCode?: string;
   name: string;
   taxId: string; // RUT/DNI
-  navitaireCode?: string;
-  sapBP?: string;
+  navitaireCode?: string | null;
+  sapBP?: string | null;
   isActive?: boolean;
 };
 
-export type CollectionStatus = 'Pendiente' | 'Preaprobado' | 'Aprobado' | 'Rechazado';
+export type CollectionStatus =
+  | 'Pendiente'
+  | 'Preaprobado'
+  | 'Aprobado'
+  | 'Rechazado'
+  | 'InformacionSolicitada';
+
+export type RequestAttachment = {
+  id: string;
+  fileName: string;
+  mimeType?: string;
+};
 
 export type CollectionRequest = {
   id: string;
@@ -54,6 +69,11 @@ export type CollectionRequest = {
   amount: number;
   clientId: string;
   supportFileName: string;
+  authorizationCode?: string; // codigo de autorizacion del comprobante bancario
+  attachments?: RequestAttachment[]; // comprobantes subidos (multiples)
+  attachmentIds?: string[]; // ids recien subidos, para vincular al guardar
+  infoRequestComment?: string; // comentario de Recaudacion al solicitar SWIFT/MT103
+  infoRequestedAt?: string; // ISO: cuando se solicito informacion
   status: CollectionStatus;
   rejectionComment?: string;
   associatedMovementId?: string;

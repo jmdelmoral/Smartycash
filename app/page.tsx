@@ -71,6 +71,11 @@ export default function HomePage() {
   const [passwordError, setPasswordError] = useState<string | null>(null);
   const [masterDataError, setMasterDataError] = useState<string | null>(null);
   const businessDataLoadedRef = useRef(false);
+  // Baseline of IDs the client has loaded, per module. Sent as knownIds so the
+  // server only reverses/annuls records this client actually knew about.
+  const knownMovementIdsRef = useRef<Set<string>>(new Set());
+  const knownRequestIdsRef = useRef<Set<string>>(new Set());
+  const knownDocIdsRef = useRef<Set<string>>(new Set());
 
   // Estado global de cuentas bancarias permitidas (Simulado)
   const [bankAccounts, setBankAccounts] = useState<BankAccount[]>([]);
@@ -197,6 +202,11 @@ export default function HomePage() {
         setMovements(movementsPayload.movements);
         setRequests(requestsPayload.requests);
         setCobranzaDocs(cobranzaPayload.documents);
+        knownMovementIdsRef.current = new Set(
+          movementsPayload.movements.map((m) => m.movementId)
+        );
+        knownRequestIdsRef.current = new Set(requestsPayload.requests.map((r) => r.id));
+        knownDocIdsRef.current = new Set(cobranzaPayload.documents.map((d) => d.id));
         businessDataLoadedRef.current = true;
       } catch (error) {
         setMasterDataError(
@@ -238,6 +248,22 @@ export default function HomePage() {
     );
   };
 
+  const handleUpdateBankAccount = async (account: BankAccount) => {
+    const response = await fetch('/api/bank-accounts', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(account),
+    });
+    const payload = (await response.json()) as { account?: BankAccount; error?: string };
+    if (!response.ok || !payload.account) {
+      setMasterDataError(payload.error ?? 'No se pudo modificar la cuenta bancaria.');
+      return;
+    }
+    setBankAccounts((prev) =>
+      prev.map((current) => (current.id === account.id ? payload.account! : current))
+    );
+  };
+
   const handleAddClient = async (client: Client) => {
     const response = await fetch('/api/clients', {
       method: 'POST',
@@ -266,11 +292,30 @@ export default function HomePage() {
     setClients((prev) => prev.map((client) => (client.id === id ? payload.client! : client)));
   };
 
+  const handleUpdateClient = async (client: Client) => {
+    const response = await fetch('/api/clients', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(client),
+    });
+    const payload = (await response.json()) as { client?: Client; error?: string };
+    if (!response.ok || !payload.client) {
+      setMasterDataError(payload.error ?? 'No se pudo modificar el cliente.');
+      return;
+    }
+    setClients((prev) =>
+      prev.map((current) => (current.id === client.id ? payload.client! : current))
+    );
+  };
+
   useEffect(() => {
     if (!businessDataLoadedRef.current || currentStatus !== 'authenticated') return;
     const timeout = window.setTimeout(() => {
+      if (movements.length === 0) return;
+      // Upsert NO destructivo de los movimientos en memoria. Las reversiones
+      // (eliminar) se manejan aparte con DELETE desde la vista de Cartola.
       fetch('/api/cartola/movements', {
-        method: 'PUT',
+        method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ movements }),
       }).catch(() => setMasterDataError('No fue posible sincronizar Cartola.'));
@@ -282,11 +327,18 @@ export default function HomePage() {
   useEffect(() => {
     if (!businessDataLoadedRef.current || currentStatus !== 'authenticated') return;
     const timeout = window.setTimeout(() => {
+      const ids = requests.map((r) => r.id);
+      if (ids.length === 0) return;
       fetch('/api/recaudacion/requests', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ requests }),
-      }).catch(() => setMasterDataError('No fue posible sincronizar Recaudacion.'));
+        body: JSON.stringify({ requests, knownIds: Array.from(knownRequestIdsRef.current) }),
+      })
+        .then((res) => {
+          if (res.ok) knownRequestIdsRef.current = new Set(ids);
+          else setMasterDataError('No fue posible sincronizar Recaudacion.');
+        })
+        .catch(() => setMasterDataError('No fue posible sincronizar Recaudacion.'));
     }, 600);
 
     return () => window.clearTimeout(timeout);
@@ -295,11 +347,18 @@ export default function HomePage() {
   useEffect(() => {
     if (!businessDataLoadedRef.current || currentStatus !== 'authenticated') return;
     const timeout = window.setTimeout(() => {
+      const ids = cobranzaDocs.map((d) => d.id);
+      if (ids.length === 0) return;
       fetch('/api/cobranza/documents', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ documents: cobranzaDocs }),
-      }).catch(() => setMasterDataError('No fue posible sincronizar Cobranza.'));
+        body: JSON.stringify({ documents: cobranzaDocs, knownIds: Array.from(knownDocIdsRef.current) }),
+      })
+        .then((res) => {
+          if (res.ok) knownDocIdsRef.current = new Set(ids);
+          else setMasterDataError('No fue posible sincronizar Cobranza.');
+        })
+        .catch(() => setMasterDataError('No fue posible sincronizar Cobranza.'));
     }, 600);
 
     return () => window.clearTimeout(timeout);
@@ -434,6 +493,7 @@ export default function HomePage() {
               <BankAccountManagement
                 accounts={bankAccounts}
                 onAddAccount={handleAddBankAccount}
+                onUpdateAccount={handleUpdateBankAccount}
                 onDeleteAccount={handleDeactivateBankAccount}
               />
             </TabsContent>
@@ -442,6 +502,7 @@ export default function HomePage() {
               <ClientManagement
                 clients={clients}
                 onAddClient={handleAddClient}
+                onUpdateClient={handleUpdateClient}
                 onDeleteClient={handleDeactivateClient}
               />
             </TabsContent>

@@ -803,7 +803,7 @@ export function CobranzaManagement({
               <option value="all">Todos los clientes</option>
               {clients.map((c) => (
                 <option key={c.id} value={c.id}>
-                  {c.name}
+                  {c.appCode || c.id} | {c.name}
                 </option>
               ))}
             </select>

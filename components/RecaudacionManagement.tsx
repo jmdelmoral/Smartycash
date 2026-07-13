@@ -23,6 +23,7 @@ import {
   CartolaDocument,
   UserRole,
   MainIdentificationType,
+  RequestAttachment,
 } from '@/types'; // Assuming these exist or need to be created
 
 interface RecaudacionManagementProps {
@@ -54,7 +55,8 @@ export function RecaudacionManagement({
   const [pnrRef, setPnrRef] = useState('');
   const [pnrAmount, setPnrAmount] = useState('');
   const [tempDocs, setTempDocs] = useState<CartolaDocument[]>([]);
-  const [supportFile, setSupportFile] = useState<File | null>(null);
+  const [supportFiles, setSupportFiles] = useState<File[]>([]);
+  const [authorizationCode, setAuthorizationCode] = useState('');
   const [error, setError] = useState<string | null>(null);
 
   // Edit/View states
@@ -64,7 +66,7 @@ export function RecaudacionManagement({
   const [isUploadSupportModalOpen, setIsUploadSupportModalOpen] = useState(false);
   const [currentRequestToUploadSupport, setCurrentRequestToUploadSupport] =
     useState<CollectionRequest | null>(null);
-  const [newSupportFileForRequest, setNewSupportFileForRequest] = useState<File | null>(null);
+  const [newSupportFilesForRequest, setNewSupportFilesForRequest] = useState<File[]>([]);
 
   const isAgente = userRole === 'AgenteCC' || userRole === 'Administrador';
   const isRecaudacion = userRole === 'Recaudacion' || userRole === 'Administrador';
@@ -213,12 +215,22 @@ export function RecaudacionManagement({
     }
   };
 
-  const onSubmitRequest = () => {
+  const onSubmitRequest = async () => {
     setError(null);
 
     // Validación de campos obligatorios
-    if (!selectedAccId || !transferDate || !totalAmount || !selectedClientId || !supportFile) {
-      setError('Todos los campos son obligatorios, incluyendo el archivo de soporte.');
+    if (
+      !selectedAccId ||
+      !transferDate ||
+      !totalAmount ||
+      !selectedClientId ||
+      !authorizationCode.trim()
+    ) {
+      setError('Todos los campos son obligatorios, incluyendo el código de autorización.');
+      return;
+    }
+    if (!editingRequestId && supportFiles.length === 0) {
+      setError('Debe adjuntar al menos un comprobante.');
       return;
     }
 
@@ -267,13 +279,48 @@ export function RecaudacionManagement({
         m.bank.toLowerCase().includes(account.bankName.toLowerCase())
     );
 
+    // Pre-chequeo en cliente (mejor UX); el servidor valida de forma autoritativa
+    // contra el historico completo aunque no este cargado en pantalla.
+    const code = authorizationCode.trim();
+    const duplicate = requests.find(
+      (r) =>
+        r.id !== editingRequestId &&
+        (r.authorizationCode ?? '').trim().toUpperCase() === code.toUpperCase() &&
+        r.bankAccountId === selectedAccId &&
+        r.clientId === selectedClientId &&
+        Math.round(r.amount) === Math.round(total)
+    );
+    if (duplicate) {
+      setError(
+        `Ya existe una solicitud (${duplicate.id}) con ese codigo de autorizacion para la misma cuenta, monto y cliente.`
+      );
+      return;
+    }
+
+    const existingReq = editingRequestId
+      ? requests.find((r) => r.id === editingRequestId)
+      : undefined;
+    let uploaded: RequestAttachment[] = [];
+    if (supportFiles.length > 0) {
+      try {
+        uploaded = await uploadAttachments(supportFiles);
+      } catch (e) {
+        setError(e instanceof Error ? e.message : 'No se pudieron subir los comprobantes.');
+        return;
+      }
+    }
+    const mergedAttachments = [...(existingReq?.attachments ?? []), ...uploaded];
+
     const newRequest: CollectionRequest = {
       id: editingRequestId || generateRequestId(),
       bankAccountId: selectedAccId,
       transferDate,
       amount: total,
       clientId: selectedClientId,
-      supportFileName: supportFile.name,
+      supportFileName: mergedAttachments[0]?.fileName ?? existingReq?.supportFileName ?? '',
+      authorizationCode: code,
+      attachments: mergedAttachments,
+      attachmentIds: uploaded.map((a) => a.id),
       status: matchingMovement ? 'Preaprobado' : 'Pendiente',
       associatedMovementId: matchingMovement?.movementId,
       documents: tempDocs,
@@ -298,7 +345,8 @@ export function RecaudacionManagement({
     setTransferDate('');
     setSelectedAccId('');
     setSelectedClientId('');
-    setSupportFile(null);
+    setSupportFiles([]);
+    setAuthorizationCode('');
     setError(null);
   };
 
@@ -309,8 +357,9 @@ export function RecaudacionManagement({
     setTotalAmount(req.amount.toString());
     setSelectedClientId(req.clientId);
     setTempDocs(req.documents);
+    setAuthorizationCode(req.authorizationCode ?? '');
     // supportFile cannot be pre-filled for security reasons, user must re-upload if needed
-    setSupportFile(null);
+    setSupportFiles([]);
     setError(null);
   };
 
@@ -321,8 +370,31 @@ export function RecaudacionManagement({
     setTransferDate('');
     setSelectedAccId('');
     setSelectedClientId('');
-    setSupportFile(null);
+    setSupportFiles([]);
+    setAuthorizationCode('');
     setError(null);
+  };
+
+  const onRequestInfo = (reqId: string) => {
+    const comment = prompt('Indique qué información adicional se requiere (ej. SWIFT/MT103):');
+    if (!comment) return;
+    setRequests(
+      requests.map((r) =>
+        r.id === reqId ? { ...r, status: 'InformacionSolicitada', infoRequestComment: comment } : r
+      )
+    );
+    alert('Se solicitó información al Agente CC. El caso quedó marcado como prioritario para él.');
+  };
+
+  const onRespondInfo = (reqId: string) => {
+    const req = requests.find((r) => r.id === reqId);
+    if (!req) return;
+    if (!req.attachments || req.attachments.length === 0) {
+      alert('Adjunte el comprobante SWIFT/MT103 antes de responder.');
+      return;
+    }
+    setRequests(requests.map((r) => (r.id === reqId ? { ...r, status: 'Pendiente' } : r)));
+    alert('Información enviada. La solicitud volvió a la cola de Recaudación.');
   };
 
   const onProcessAction = (reqId: string, action: 'Aprobar' | 'Rechazar') => {
@@ -386,34 +458,66 @@ export function RecaudacionManagement({
   };
 
   const handleSupportFileUpload = (event: React.ChangeEvent<HTMLInputElement>) => {
-    setNewSupportFileForRequest(event.target.files?.[0] || null);
+    setNewSupportFilesForRequest(Array.from(event.target.files ?? []));
   };
 
-  const onConfirmUploadSupport = () => {
-    if (currentRequestToUploadSupport && newSupportFileForRequest) {
+  // Sube archivos al servidor (multipart). Con collectionRequestId quedan
+  // vinculados de inmediato a esa solicitud.
+  const uploadAttachments = async (
+    files: File[],
+    collectionRequestId?: string
+  ): Promise<RequestAttachment[]> => {
+    const fd = new FormData();
+    files.forEach((f) => fd.append('files', f));
+    if (collectionRequestId) fd.append('collectionRequestId', collectionRequestId);
+    const res = await fetch('/api/recaudacion/attachments', { method: 'POST', body: fd });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'No se pudieron subir los comprobantes.');
+    return data.attachments as RequestAttachment[];
+  };
+
+  const onConfirmUploadSupport = async () => {
+    if (!currentRequestToUploadSupport || newSupportFilesForRequest.length === 0) {
+      alert('Por favor, seleccione al menos un archivo.');
+      return;
+    }
+    const targetId = currentRequestToUploadSupport.id;
+    try {
+      const uploaded = await uploadAttachments(newSupportFilesForRequest, targetId);
       setRequests((prev) =>
         prev.map((req) =>
-          req.id === currentRequestToUploadSupport.id
-            ? { ...req, supportFileName: newSupportFileForRequest.name }
+          req.id === targetId
+            ? {
+                ...req,
+                supportFileName: req.supportFileName || uploaded[0]?.fileName || '',
+                attachments: [...(req.attachments ?? []), ...uploaded],
+              }
             : req
         )
       );
-      alert(
-        `Soporte "${newSupportFileForRequest.name}" adjuntado a la solicitud ${currentRequestToUploadSupport.id}.`
-      );
-      setIsUploadSupportModalOpen(false);
-      setNewSupportFileForRequest(null);
-      setCurrentRequestToUploadSupport(null);
-    } else {
-      alert('Por favor, seleccione un archivo.');
+      alert(`Se adjuntaron ${uploaded.length} comprobante(s) a la solicitud ${targetId}.`);
+    } catch (e) {
+      alert(e instanceof Error ? e.message : 'No se pudieron subir los comprobantes.');
+      return;
     }
+    setIsUploadSupportModalOpen(false);
+    setNewSupportFilesForRequest([]);
+    setCurrentRequestToUploadSupport(null);
   };
 
-  const onDownloadSupportFile = (fileName: string) => {
-    alert(
-      `Simulando descarga del archivo: ${fileName}. En un sistema real, esto iniciaría la descarga.`
+  const onDeleteAttachment = async (reqId: string, attachmentId: string) => {
+    const res = await fetch(`/api/recaudacion/attachments/${attachmentId}`, { method: 'DELETE' });
+    if (!res.ok) {
+      alert('No se pudo eliminar el comprobante.');
+      return;
+    }
+    setRequests((prev) =>
+      prev.map((r) =>
+        r.id === reqId
+          ? { ...r, attachments: (r.attachments ?? []).filter((a) => a.id !== attachmentId) }
+          : r
+      )
     );
-    // Implement actual download logic here if files were stored on a server
   };
 
   const onExportRequests = () => {
@@ -469,7 +573,7 @@ export function RecaudacionManagement({
                 <option value="">Seleccione cuenta...</option>
                 {bankAccounts.map((a) => (
                   <option key={a.id} value={a.id}>
-                    {a.bankName} - {a.accountNumber}
+                    {a.displayId || a.id} | {a.bankName} - {a.accountNumber} | {a.currency}
                   </option>
                 ))}
               </select>
@@ -501,18 +605,32 @@ export function RecaudacionManagement({
                 <option value="">Buscar cliente...</option>
                 {clients.map((c) => (
                   <option key={c.id} value={c.id}>
-                    {c.name} ({c.taxId})
+                    {c.appCode || c.id} | {c.name} ({c.taxId})
                   </option>
                 ))}
               </select>
             </div>
             <div className="space-y-1">
-              <label className="text-xs font-medium">Soporte (PDF/JPG)</label>
+              <label className="text-xs font-medium">Código de autorización</label>
+              <Input
+                value={authorizationCode}
+                onChange={(e) => setAuthorizationCode(e.target.value)}
+                placeholder="Código del comprobante bancario"
+              />
+            </div>
+            <div className="space-y-1">
+              <label className="text-xs font-medium">Comprobante(s) (PDF/JPG/PNG)</label>
               <Input
                 type="file"
+                multiple
                 className="cursor-pointer"
-                onChange={(e) => setSupportFile(e.target.files?.[0] || null)}
+                onChange={(e) => setSupportFiles(Array.from(e.target.files ?? []))}
               />
+              {supportFiles.length > 0 && (
+                <p className="text-[10px] text-slate-500">
+                  {supportFiles.length} archivo(s) seleccionado(s)
+                </p>
+              )}
             </div>
           </div>
 
@@ -598,7 +716,13 @@ export function RecaudacionManagement({
                   </td>
                 </tr>
               ) : (
-                requests.map((r) => {
+                [...requests]
+                  .sort(
+                    (a, b) =>
+                      (a.status === 'InformacionSolicitada' ? 0 : 1) -
+                      (b.status === 'InformacionSolicitada' ? 0 : 1)
+                  )
+                  .map((r) => {
                   const associatedAccount = bankAccounts.find((acc) => acc.id === r.bankAccountId);
                   const associatedClient = clients.find((c) => c.id === r.clientId);
                   const associatedMovement = r.associatedMovementId
@@ -608,17 +732,24 @@ export function RecaudacionManagement({
                   return (
                     <tr
                       key={r.id}
-                      className={`border-b ${r.status === 'Rechazado' ? 'bg-red-50/40' : r.status === 'Aprobado' ? 'bg-emerald-50/40' : ''}`}
+                      className={`border-b ${r.status === 'Rechazado' ? 'bg-red-50/40' : r.status === 'Aprobado' ? 'bg-emerald-50/40' : r.status === 'InformacionSolicitada' ? 'bg-amber-100/70' : ''}`}
                     >
                       <td className="px-3 py-3 font-mono text-[10px]">{r.id}</td>
                       <td className="px-3 py-3">
                         <div className="text-xs font-medium">
+                          {associatedAccount?.displayId || associatedAccount?.id} |{' '}
                           {associatedAccount?.bankName} - {associatedAccount?.accountNumber} (
                           {associatedAccount?.country})
                         </div>
                         <div className="text-xs">
                           {r.transferDate} | <b>${r.amount.toLocaleString()}</b>
                         </div>
+                        {r.authorizationCode && (
+                          <div className="text-[10px] text-slate-500 mt-0.5">
+                            Cód. autorización:{' '}
+                            <span className="font-mono">{r.authorizationCode}</span>
+                          </div>
+                        )}
                         {associatedMovement && (
                           <div className="text-[10px] text-emerald-600 mt-1 bg-emerald-50 p-1 rounded border border-emerald-100">
                             Vínculo Cartola: {associatedMovement.bank} (
@@ -626,7 +757,12 @@ export function RecaudacionManagement({
                           </div>
                         )}
                       </td>
-                      <td className="px-3 py-3">{associatedClient?.name}</td>
+                      <td className="px-3 py-3">
+                        <div>{associatedClient?.name}</div>
+                        <div className="font-mono text-[10px] text-slate-500">
+                          {associatedClient?.appCode || associatedClient?.id}
+                        </div>
+                      </td>
                       <td className="px-3 py-3">
                         <Badge variant="secondary">{r.documents.length} PNRs</Badge>
                         <Button
@@ -642,30 +778,46 @@ export function RecaudacionManagement({
                         </Button>
                       </td>
                       <td className="px-3 py-3">
-                        {r.supportFileName ? (
-                          <Button
-                            variant="link"
-                            size="sm"
-                            className="h-auto p-0 text-xs"
-                            onClick={() => onDownloadSupportFile(r.supportFileName!)}
-                          >
-                            {r.supportFileName}
-                          </Button>
+                        {r.attachments && r.attachments.length > 0 ? (
+                          <div className="space-y-1">
+                            {r.attachments.map((a) => (
+                              <div key={a.id} className="flex items-center gap-1">
+                                <a
+                                  href={`/api/recaudacion/attachments/${a.id}`}
+                                  target="_blank"
+                                  rel="noreferrer"
+                                  className="text-xs text-blue-600 underline"
+                                >
+                                  {a.fileName}
+                                </a>
+                                {(isAgente || isRecaudacion) && (
+                                  <button
+                                    type="button"
+                                    className="text-[10px] text-red-500"
+                                    onClick={() => onDeleteAttachment(r.id, a.id)}
+                                    title="Eliminar comprobante"
+                                  >
+                                    ✕
+                                  </button>
+                                )}
+                              </div>
+                            ))}
+                          </div>
                         ) : (
                           <span className="text-slate-500 text-xs">Sin soporte</span>
                         )}
                         {isAgente &&
-                          !r.supportFileName &&
                           (r.status === 'Pendiente' ||
                             r.status === 'Preaprobado' ||
-                            r.status === 'Rechazado') && (
+                            r.status === 'Rechazado' ||
+                            r.status === 'InformacionSolicitada') && (
                             <Button
                               variant="outline"
                               size="sm"
-                              className="h-auto p-1 ml-2 text-[10px]"
+                              className="h-auto p-1 mt-1 text-[10px]"
                               onClick={() => onUploadSupportFileForRequest(r)}
                             >
-                              Adjuntar Soporte
+                              Adjuntar comprobante
                             </Button>
                           )}
                       </td>
@@ -681,14 +833,21 @@ export function RecaudacionManagement({
                           className={
                             r.status === 'Preaprobado'
                               ? 'bg-amber-100 text-amber-700 border-amber-200'
-                              : ''
+                              : r.status === 'InformacionSolicitada'
+                                ? 'bg-orange-100 text-orange-700 border-orange-200'
+                                : ''
                           }
                         >
-                          {r.status}
+                          {r.status === 'InformacionSolicitada' ? 'Info solicitada' : r.status}
                         </Badge>
                         {r.rejectionComment && (
                           <div className="text-[10px] text-red-600 mt-1 italic">
                             Motivo: {r.rejectionComment}
+                          </div>
+                        )}
+                        {r.status === 'InformacionSolicitada' && r.infoRequestComment && (
+                          <div className="text-[10px] text-orange-700 mt-1 italic font-medium">
+                            Requerido: {r.infoRequestComment}
                           </div>
                         )}
                       </td>
@@ -738,7 +897,26 @@ export function RecaudacionManagement({
                                 Rechazar
                               </Button>
                             </div>
+                            {r.status !== 'InformacionSolicitada' && (
+                              <Button
+                                size="sm"
+                                variant="outline"
+                                className="h-7 text-[10px]"
+                                onClick={() => onRequestInfo(r.id)}
+                              >
+                                Solicitar info (SWIFT/MT103)
+                              </Button>
+                            )}
                           </div>
+                        )}
+                        {isAgente && r.status === 'InformacionSolicitada' && (
+                          <Button
+                            size="sm"
+                            className="h-7 text-[10px] bg-orange-600 hover:bg-orange-700"
+                            onClick={() => onRespondInfo(r.id)}
+                          >
+                            Responder (reenviar)
+                          </Button>
                         )}
                         {isAgente && (r.status === 'Pendiente' || r.status === 'Preaprobado') && (
                           <Button
@@ -795,10 +973,10 @@ export function RecaudacionManagement({
             </DialogDescription>
           </DialogHeader>
           <div className="grid gap-4 py-4">
-            <Input type="file" onChange={handleSupportFileUpload} />
-            {newSupportFileForRequest && (
+            <Input type="file" multiple onChange={handleSupportFileUpload} />
+            {newSupportFilesForRequest.length > 0 && (
               <p className="text-sm text-slate-600">
-                Archivo seleccionado: {newSupportFileForRequest.name}
+                {newSupportFilesForRequest.length} archivo(s) seleccionado(s)
               </p>
             )}
           </div>
@@ -806,7 +984,7 @@ export function RecaudacionManagement({
             <Button variant="outline" onClick={() => setIsUploadSupportModalOpen(false)}>
               Cancelar
             </Button>
-            <Button onClick={onConfirmUploadSupport} disabled={!newSupportFileForRequest}>
+            <Button onClick={onConfirmUploadSupport} disabled={newSupportFilesForRequest.length === 0}>
               Adjuntar
             </Button>
           </DialogFooter>

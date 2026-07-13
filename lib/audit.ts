@@ -1,4 +1,4 @@
-import type { TraceModule } from '@/lib/generated/prisma';
+import type { Prisma, TraceModule } from '@/lib/generated/prisma';
 import prisma from '@/lib/prisma';
 
 type AuditInput = {
@@ -17,8 +17,18 @@ function getHeader(request: Request | undefined, name: string): string | undefin
   return request?.headers.get(name) ?? undefined;
 }
 
-export async function auditAction(input: AuditInput): Promise<void> {
-  await prisma.auditLog.create({
+/**
+ * Write an audit log entry.
+ *
+ * Pass the transaction client (`tx`) when auditing changes made inside a
+ * `prisma.$transaction(...)` so the audit row commits/rolls back atomically
+ * with the business change. Defaults to the shared prisma client otherwise.
+ */
+export async function auditAction(
+  input: AuditInput,
+  client: Prisma.TransactionClient = prisma
+): Promise<void> {
+  await client.auditLog.create({
     data: {
       actorId: input.actorId ?? null,
       action: input.action,

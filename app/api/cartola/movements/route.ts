@@ -4,6 +4,9 @@ import { z } from 'zod';
 
 import { auditAction } from '@/lib/audit';
 import { authOptions } from '@/lib/auth';
+import { canRead, canWrite } from '@/lib/authz';
+import { buildMovementWhere, parsePagination } from '@/lib/cartola-filters';
+import { applyMovement, type AuditEvent } from '@/lib/cartola-write';
 import {
   cartolaToUi,
   moduleFromIdentification,
@@ -34,7 +37,6 @@ const movementSchema = z.object({
     'Sin identificar',
     'Adquiriente',
     'GC',
-    'Cobranza crÃ©dito',
     'Cobranza crédito',
   ]),
   mainIdentificationId: z.string().optional().default(''),
@@ -43,21 +45,42 @@ const movementSchema = z.object({
 
 const payloadSchema = z.object({
   movements: z.array(movementSchema),
+  // IDs the client had loaded (baseline). Used to scope reversals so we never
+  // touch records created concurrently by other users. Optional for back-compat.
+  knownIds: z.array(z.string()).optional(),
 });
 
-export async function GET() {
+export async function GET(request: Request) {
   const session = await getServerSession(authOptions);
   if (!session?.user?.email) {
     return NextResponse.json({ error: 'No autenticado' }, { status: 401 });
   }
+  if (!canRead(session, 'Cartola')) {
+    return NextResponse.json({ error: 'Sin permisos' }, { status: 403 });
+  }
 
-  const movements = await prisma.cartolaMovement.findMany({
-    where: { status: { not: 'Reversed' } },
-    include: { allocations: true },
-    orderBy: [{ date: 'desc' }, { createdAt: 'desc' }],
+  const { searchParams } = new URL(request.url);
+  const where = buildMovementWhere(searchParams);
+  const { paginate, page, pageSize } = parsePagination(searchParams);
+
+  // Backward compatible: with no `pageSize` param we return the full filtered
+  // set (legacy behaviour). With `pageSize` we paginate and also report `total`.
+  const [total, rows] = await prisma.$transaction([
+    prisma.cartolaMovement.count({ where }),
+    prisma.cartolaMovement.findMany({
+      where,
+      include: { allocations: { include: { saleReference: true } } },
+      orderBy: [{ date: 'desc' }, { createdAt: 'desc' }],
+      ...(paginate && pageSize ? { skip: (page - 1) * pageSize, take: pageSize } : {}),
+    }),
+  ]);
+
+  return NextResponse.json({
+    movements: rows.map(cartolaToUi),
+    total,
+    page: paginate ? page : 1,
+    pageSize: paginate && pageSize ? pageSize : total,
   });
-
-  return NextResponse.json({ movements: movements.map(cartolaToUi) });
 }
 
 export async function PUT(request: Request) {
@@ -65,13 +88,29 @@ export async function PUT(request: Request) {
   if (!session?.user?.email) {
     return NextResponse.json({ error: 'No autenticado' }, { status: 401 });
   }
+  if (!canWrite(session, 'Cartola')) {
+    return NextResponse.json({ error: 'Sin permisos' }, { status: 403 });
+  }
 
   const parsed = payloadSchema.safeParse(await request.json());
   if (!parsed.success) {
     return NextResponse.json({ error: 'Datos invalidos' }, { status: 400 });
   }
 
+  if (parsed.data.movements.length === 0) {
+    return NextResponse.json(
+      { error: 'Sincronización vacía omitida para evitar borrado masivo' },
+      { status: 400 }
+    );
+  }
+
   const movementIds = parsed.data.movements.map((movement) => movement.movementId);
+  const payloadIdSet = new Set(movementIds);
+  // Only reverse records the client knew about and dropped. When knownIds is
+  // absent we fall back to the legacy behaviour (reverse everything not sent).
+  const reverseIdFilter = parsed.data.knownIds
+    ? { in: parsed.data.knownIds.filter((id) => !payloadIdSet.has(id)) }
+    : { notIn: movementIds.length > 0 ? movementIds : [''] };
   const auditEvents: Array<{
     action: string;
     entityId: string;
@@ -89,7 +128,7 @@ export async function PUT(request: Request) {
 
     const movementsToReverse = await tx.cartolaMovement.findMany({
       where: {
-        id: { notIn: movementIds.length > 0 ? movementIds : [''] },
+        id: reverseIdFilter,
         status: { not: 'Reversed' },
       },
       select: { id: true, status: true },
@@ -97,7 +136,7 @@ export async function PUT(request: Request) {
 
     await tx.cartolaMovement.updateMany({
       where: {
-        id: { notIn: movementIds.length > 0 ? movementIds : [''] },
+        id: reverseIdFilter,
         status: { not: 'Reversed' },
       },
       data: { status: 'Reversed' },
@@ -227,30 +266,139 @@ export async function PUT(request: Request) {
         });
       }
     }
+    for (const event of auditEvents) {
+      await auditAction(
+        {
+          actorId: session.user.id,
+          action: event.action,
+          module: 'Cartola',
+          entityType: 'CartolaMovement',
+          entityId: event.entityId,
+          before: event.before,
+          after: event.after,
+          metadata: event.metadata,
+          request,
+        },
+        tx
+      );
+    }
+
+    await auditAction(
+      {
+        actorId: session.user.id,
+        action: 'bulk_sync',
+        module: 'Cartola',
+        entityType: 'CartolaMovement',
+        entityId: 'snapshot',
+        metadata: { count: parsed.data.movements.length },
+        request,
+      },
+      tx
+    );
   });
 
-  for (const event of auditEvents) {
-    await auditAction({
-      actorId: session.user.id,
-      action: event.action,
-      module: 'Cartola',
-      entityType: 'CartolaMovement',
-      entityId: event.entityId,
-      before: event.before,
-      after: event.after,
-      metadata: event.metadata,
-      request,
-    });
+  return NextResponse.json({ ok: true });
+}
+
+
+const createPayloadSchema = z.object({
+  movements: z.array(movementSchema).min(1),
+});
+
+/**
+ * Create or edit movements ONE-BY-ONE (or in a batch, e.g. CSV upload) without
+ * the destructive "reverse everything not sent" behaviour. This is the write
+ * path used by the paginated frontend, where the client no longer holds the
+ * full dataset in memory.
+ */
+export async function POST(request: Request) {
+  const session = await getServerSession(authOptions);
+  if (!session?.user?.email) {
+    return NextResponse.json({ error: 'No autenticado' }, { status: 401 });
+  }
+  if (!canWrite(session, 'Cartola')) {
+    return NextResponse.json({ error: 'Sin permisos' }, { status: 403 });
   }
 
-  await auditAction({
-    actorId: session.user.id,
-    action: 'bulk_sync',
-    module: 'Cartola',
-    entityType: 'CartolaMovement',
-    entityId: 'snapshot',
-    metadata: { count: parsed.data.movements.length },
-    request,
+  const parsed = createPayloadSchema.safeParse(await request.json());
+  if (!parsed.success) {
+    return NextResponse.json({ error: 'Datos invalidos' }, { status: 400 });
+  }
+
+  const auditEvents: AuditEvent[] = [];
+  await prisma.$transaction(async (tx) => {
+    for (const movement of parsed.data.movements) {
+      await applyMovement(tx, movement, session.user.id, auditEvents);
+    }
+    for (const event of auditEvents) {
+      await auditAction(
+        {
+          actorId: session.user.id,
+          action: event.action,
+          module: 'Cartola',
+          entityType: 'CartolaMovement',
+          entityId: event.entityId,
+          before: event.before,
+          after: event.after,
+          metadata: event.metadata,
+          request,
+        },
+        tx
+      );
+    }
+  });
+
+  return NextResponse.json({ ok: true, count: parsed.data.movements.length }, { status: 201 });
+}
+
+const deletePayloadSchema = z.object({
+  movementIds: z.array(z.string().min(1)).min(1),
+});
+
+/**
+ * Reverse (soft-delete) specific movements by id. Replaces the reverse path of
+ * the old bulk PUT with an explicit, non-destructive operation.
+ */
+export async function DELETE(request: Request) {
+  const session = await getServerSession(authOptions);
+  if (!session?.user?.email) {
+    return NextResponse.json({ error: 'No autenticado' }, { status: 401 });
+  }
+  if (!canWrite(session, 'Cartola')) {
+    return NextResponse.json({ error: 'Sin permisos' }, { status: 403 });
+  }
+
+  const parsed = deletePayloadSchema.safeParse(await request.json());
+  if (!parsed.success) {
+    return NextResponse.json({ error: 'Datos invalidos' }, { status: 400 });
+  }
+
+  await prisma.$transaction(async (tx) => {
+    const toReverse = await tx.cartolaMovement.findMany({
+      where: { id: { in: parsed.data.movementIds }, status: { not: 'Reversed' } },
+      select: { id: true, status: true },
+    });
+
+    await tx.cartolaMovement.updateMany({
+      where: { id: { in: parsed.data.movementIds }, status: { not: 'Reversed' } },
+      data: { status: 'Reversed' },
+    });
+
+    for (const reversed of toReverse) {
+      await auditAction(
+        {
+          actorId: session.user.id,
+          action: 'movement_reversed',
+          module: 'Cartola',
+          entityType: 'CartolaMovement',
+          entityId: reversed.id,
+          before: { status: reversed.status },
+          after: { status: 'Reversed' },
+          request,
+        },
+        tx
+      );
+    }
   });
 
   return NextResponse.json({ ok: true });

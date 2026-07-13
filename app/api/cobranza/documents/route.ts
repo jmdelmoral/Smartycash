@@ -4,6 +4,7 @@ import { z } from 'zod';
 
 import { auditAction } from '@/lib/audit';
 import { authOptions } from '@/lib/auth';
+import { canRead, canWrite } from '@/lib/authz';
 import { cobranzaToUi, cobranzaTypeToPrisma, parseDateInput } from '@/lib/business-mappers';
 import prisma from '@/lib/prisma';
 
@@ -36,12 +37,18 @@ const documentSchema = z.object({
 
 const payloadSchema = z.object({
   documents: z.array(documentSchema),
+  // IDs the client had loaded (baseline). Used to scope annulments so we never
+  // touch records created concurrently by other users. Optional for back-compat.
+  knownIds: z.array(z.string()).optional(),
 });
 
 export async function GET() {
   const session = await getServerSession(authOptions);
   if (!session?.user?.email) {
     return NextResponse.json({ error: 'No autenticado' }, { status: 401 });
+  }
+  if (!canRead(session, 'Cobranza')) {
+    return NextResponse.json({ error: 'Sin permisos' }, { status: 403 });
   }
 
   const documents = await prisma.cobranzaDocument.findMany({
@@ -58,13 +65,64 @@ export async function PUT(request: Request) {
   if (!session?.user?.email) {
     return NextResponse.json({ error: 'No autenticado' }, { status: 401 });
   }
+  if (!canWrite(session, 'Cobranza')) {
+    return NextResponse.json({ error: 'Sin permisos' }, { status: 403 });
+  }
 
   const parsed = payloadSchema.safeParse(await request.json());
   if (!parsed.success) {
     return NextResponse.json({ error: 'Datos invalidos' }, { status: 400 });
   }
 
+  if (parsed.data.documents.length === 0) {
+    return NextResponse.json(
+      { error: 'Sincronización vacía omitida para evitar borrado masivo' },
+      { status: 400 }
+    );
+  }
+
   const documentIds = parsed.data.documents.map((document) => document.id);
+  const payloadIdSet = new Set(documentIds);
+  const reverseIdFilter = parsed.data.knownIds
+    ? { in: parsed.data.knownIds.filter((id) => !payloadIdSet.has(id)) }
+    : { notIn: documentIds.length > 0 ? documentIds : [''] };
+  // #3 Correctitud financiera: el servidor NO confía en el saldo/estado que
+  // envía el cliente. Valida cuadratura de PNR y sobrepago, y computa
+  // pendingAmount y status a partir de los pagos (tolerancia de medio centavo).
+  const round2 = (n: number) => Math.round(n * 100) / 100;
+  const EPS = 0.005;
+  const derivedByDocId = new Map<
+    string,
+    { pendingAmount: number; status: 'Pendiente' | 'Parcial' | 'Pagado' }
+  >();
+  for (const document of parsed.data.documents) {
+    const total = round2(document.totalAmount);
+    if (document.subDocuments.length > 0) {
+      const itemsSum = round2(document.subDocuments.reduce((sum, item) => sum + item.amount, 0));
+      if (Math.abs(itemsSum - total) > EPS) {
+        return NextResponse.json(
+          {
+            error: `Documento ${document.id}: la suma de PNR (${itemsSum}) no cuadra con el total (${total}).`,
+          },
+          { status: 400 }
+        );
+      }
+    }
+    const paymentsSum = round2(document.payments.reduce((sum, payment) => sum + payment.amount, 0));
+    if (paymentsSum - total > EPS) {
+      return NextResponse.json(
+        {
+          error: `Documento ${document.id}: los pagos (${paymentsSum}) superan el total (${total}).`,
+        },
+        { status: 400 }
+      );
+    }
+    const pendingAmount = Math.max(round2(total - paymentsSum), 0);
+    const status: 'Pendiente' | 'Parcial' | 'Pagado' =
+      pendingAmount <= EPS ? 'Pagado' : pendingAmount >= total - EPS ? 'Pendiente' : 'Parcial';
+    derivedByDocId.set(document.id, { pendingAmount, status });
+  }
+
   const auditEvents: Array<{
     action: string;
     entityId: string;
@@ -82,7 +140,7 @@ export async function PUT(request: Request) {
 
     const documentsToAnnul = await tx.cobranzaDocument.findMany({
       where: {
-        id: { notIn: documentIds.length > 0 ? documentIds : [''] },
+        id: reverseIdFilter,
         status: { not: 'Anulado' },
       },
       select: { id: true, status: true },
@@ -90,7 +148,7 @@ export async function PUT(request: Request) {
 
     await tx.cobranzaDocument.updateMany({
       where: {
-        id: { notIn: documentIds.length > 0 ? documentIds : [''] },
+        id: reverseIdFilter,
         status: { not: 'Anulado' },
       },
       data: { status: 'Anulado' },
@@ -107,6 +165,7 @@ export async function PUT(request: Request) {
 
     for (const document of parsed.data.documents) {
       const previous = existingById.get(document.id);
+      const derived = derivedByDocId.get(document.id)!;
       await tx.cobranzaDocument.upsert({
         where: { id: document.id },
         update: {
@@ -116,8 +175,8 @@ export async function PUT(request: Request) {
           country: document.country,
           clientId: document.clientId,
           totalAmount: document.totalAmount,
-          pendingAmount: document.pendingAmount,
-          status: document.status,
+          pendingAmount: derived.pendingAmount,
+          status: derived.status,
         },
         create: {
           id: document.id,
@@ -127,8 +186,8 @@ export async function PUT(request: Request) {
           country: document.country,
           clientId: document.clientId,
           totalAmount: document.totalAmount,
-          pendingAmount: document.pendingAmount,
-          status: document.status,
+          pendingAmount: derived.pendingAmount,
+          status: derived.status,
           createdById: session.user.id,
         },
       });
@@ -138,12 +197,12 @@ export async function PUT(request: Request) {
           action: 'document_created',
           entityId: document.id,
           after: {
-            status: document.status,
+            status: derived.status,
             totalAmount: document.totalAmount,
-            pendingAmount: document.pendingAmount,
+            pendingAmount: derived.pendingAmount,
           },
         });
-      } else if (previous.status !== document.status) {
+      } else if (previous.status !== derived.status) {
         auditEvents.push({
           action: 'document_status_changed',
           entityId: document.id,
@@ -152,8 +211,8 @@ export async function PUT(request: Request) {
             pendingAmount: previous.pendingAmount,
           },
           after: {
-            status: document.status,
-            pendingAmount: document.pendingAmount,
+            status: derived.status,
+            pendingAmount: derived.pendingAmount,
           },
         });
       }
@@ -231,30 +290,35 @@ export async function PUT(request: Request) {
         });
       }
     }
-  });
+    for (const event of auditEvents) {
+      await auditAction(
+        {
+          actorId: session.user.id,
+          action: event.action,
+          module: 'Cobranza',
+          entityType: 'CobranzaDocument',
+          entityId: event.entityId,
+          before: event.before,
+          after: event.after,
+          metadata: event.metadata,
+          request,
+        },
+        tx
+      );
+    }
 
-  for (const event of auditEvents) {
-    await auditAction({
-      actorId: session.user.id,
-      action: event.action,
-      module: 'Cobranza',
-      entityType: 'CobranzaDocument',
-      entityId: event.entityId,
-      before: event.before,
-      after: event.after,
-      metadata: event.metadata,
-      request,
-    });
-  }
-
-  await auditAction({
-    actorId: session.user.id,
-    action: 'bulk_sync',
-    module: 'Cobranza',
-    entityType: 'CobranzaDocument',
-    entityId: 'snapshot',
-    metadata: { count: parsed.data.documents.length },
-    request,
+    await auditAction(
+      {
+        actorId: session.user.id,
+        action: 'bulk_sync',
+        module: 'Cobranza',
+        entityType: 'CobranzaDocument',
+        entityId: 'snapshot',
+        metadata: { count: parsed.data.documents.length },
+        request,
+      },
+      tx
+    );
   });
 
   return NextResponse.json({ ok: true });

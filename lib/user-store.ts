@@ -62,7 +62,11 @@ export async function ensureSeedAdminUser(): Promise<void> {
   if (count > 0) return;
 
   const adminEmail = (process.env.ADMIN_EMAIL ?? 'admin@smartycash.cl').toLowerCase();
-  const adminPassword = process.env.ADMIN_PASSWORD ?? 'Admin1234!';
+  // No hardcoded default password: if ADMIN_PASSWORD is not provided we generate
+  // a strong random one and log it ONCE so there is no well-known default in the
+  // codebase. The admin must change it on first login (mustChangePassword).
+  const providedPassword = process.env.ADMIN_PASSWORD;
+  const adminPassword = providedPassword ?? generateRandomPassword(16);
   await prisma.user.create({
     data: {
       email: adminEmail,
@@ -73,6 +77,14 @@ export async function ensureSeedAdminUser(): Promise<void> {
       passwordHash: hashPassword(adminPassword),
     },
   });
+  if (!providedPassword) {
+    console.warn(
+      `[seed] Usuario administrador inicial creado: ${adminEmail}\n` +
+        `[seed] Contraseña temporal generada: ${adminPassword}\n` +
+        `[seed] Cámbiala en el primer inicio de sesión. No se volverá a mostrar. ` +
+        `Para fijarla tú mismo, define ADMIN_PASSWORD en el entorno antes del primer arranque.`
+    );
+  }
 }
 
 export async function authenticateUser(
