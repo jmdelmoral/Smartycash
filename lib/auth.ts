@@ -63,26 +63,38 @@ export const authOptions: NextAuthOptions = {
         password: { label: 'Contraseña', type: 'password' },
       },
       async authorize(credentials) {
-        await ensureSeedAdminUser();
-        const credentialsSchema = z.object({
-          email: z.string().trim().email(),
-          password: z.string().min(1),
-        });
-        const parsed = credentialsSchema.safeParse(credentials);
-        if (!parsed.success) {
+        try {
+          await ensureSeedAdminUser();
+          const credentialsSchema = z.object({
+            email: z.string().trim().email(),
+            password: z.string().min(1),
+          });
+          const parsed = credentialsSchema.safeParse(credentials);
+          if (!parsed.success) {
+            console.warn('[auth] Credenciales con formato inválido (email/clave vacíos).');
+            return null;
+          }
+          const user = await authenticateUser(parsed.data.email, parsed.data.password);
+          if (!user) {
+            console.warn(
+              `[auth] Login fallido para "${parsed.data.email}": usuario inexistente/inactivo o contraseña incorrecta. ` +
+                `(largo de clave recibida: ${parsed.data.password.length})`
+            );
+            return null;
+          }
+          return {
+            id: user.id,
+            name: user.name,
+            email: user.email,
+            role: user.role,
+            mustChangePassword: user.mustChangePassword,
+          };
+        } catch (err) {
+          // Un error aquí (p. ej. de Prisma/conexión) hace que NextAuth devuelva
+          // 401. Lo logueamos para no diagnosticar a ciegas.
+          console.error('[auth] Error en authorize (posible fallo de base/conexión):', err);
           return null;
         }
-        const user = await authenticateUser(parsed.data.email, parsed.data.password);
-        if (!user) {
-          return null;
-        }
-        return {
-          id: user.id,
-          name: user.name,
-          email: user.email,
-          role: user.role,
-          mustChangePassword: user.mustChangePassword,
-        };
       },
     }),
     ...(isKeycloakConfigured

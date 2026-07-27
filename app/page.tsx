@@ -85,6 +85,11 @@ export default function HomePage() {
   // Cuando refrescamos movimientos desde el servidor tras un guardado, saltamos
   // UNA re-sincronización para no crear un bucle sync -> refetch -> sync.
   const suppressCartolaSyncRef = useRef(false);
+  // Igual para la sincronización de Recaudación (guarda solicitudes y, del lado
+  // servidor, reconcilia atómicamente el movimiento asociado).
+  const recaudacionSyncInFlightRef = useRef(false);
+  const recaudacionSyncDirtyRef = useRef(false);
+  const suppressRecaudacionSyncRef = useRef(false);
 
   // Estado global de cuentas bancarias permitidas (Simulado)
   const [bankAccounts, setBankAccounts] = useState<BankAccount[]>([]);
@@ -106,23 +111,18 @@ export default function HomePage() {
   // Lifting Collection Requests state
   */
   const [requests, setRequests] = useState<CollectionRequest[]>([]);
+  const requestsRef = useRef<CollectionRequest[]>(requests);
+  requestsRef.current = requests;
 
   // Lifting Cobranza Documents state
   const [cobranzaDocs, setCobranzaDocs] = useState<CobranzaMainDocument[]>([]);
 
-  const handleReconcileFromRecaudacion = (movementId: string, documents: CartolaDocument[]) => {
-    setMovements((prev) =>
-      prev.map((m) =>
-        m.movementId === movementId
-          ? {
-              ...m,
-              documents,
-              mainIdentification: 'GC',
-              mainIdentificationId: 'IDN-GC',
-            }
-          : m
-      )
-    );
+  // La reconciliación del movimiento de cartola ahora la hace el SERVIDOR de forma
+  // atómica junto con la solicitud (ver PUT /api/recaudacion/requests). El cliente
+  // ya no muta el movimiento aquí: así nunca queda identificado sin una solicitud
+  // efectivamente guardada. El movimiento se refresca tras sincronizar recaudación.
+  const handleReconcileFromRecaudacion = (_movementId: string, _documents: CartolaDocument[]) => {
+    /* no-op intencional: reconciliación server-side y atómica */
   };
 
   // Detectar si la autenticación está habilitada desde las variables de entorno
@@ -400,41 +400,103 @@ export default function HomePage() {
     return () => window.clearTimeout(timeout);
   }, [currentStatus, movements, syncCartola]);
 
-  useEffect(() => {
-    if (!businessDataLoadedRef.current || currentStatus !== 'authenticated') return;
-    const timeout = window.setTimeout(() => {
-      const ids = requests.map((r) => r.id);
-      if (ids.length === 0) return;
-      fetch('/api/recaudacion/requests', {
+  const syncRecaudacion = useCallback(async (payload: CollectionRequest[]) => {
+    const ids = payload.map((r) => r.id);
+    if (ids.length === 0) return;
+    if (recaudacionSyncInFlightRef.current) {
+      recaudacionSyncDirtyRef.current = true;
+      return;
+    }
+    recaudacionSyncInFlightRef.current = true;
+    try {
+      const res = await fetch('/api/recaudacion/requests', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ requests, knownIds: Array.from(knownRequestIdsRef.current) }),
-      })
-        .then((res) => {
-          if (res.ok) knownRequestIdsRef.current = new Set(ids);
-          else setMasterDataError('No fue posible sincronizar Recaudacion.');
-        })
-        .catch(() => setMasterDataError('No fue posible sincronizar Recaudacion.'));
+        body: JSON.stringify({ requests: payload, knownIds: Array.from(knownRequestIdsRef.current) }),
+      });
+      if (!res.ok) {
+        const data = (await res.json().catch(() => ({}))) as { error?: string };
+        setMasterDataError(
+          `Sincronización de Recaudación: ${data.error ?? 'no fue posible guardar.'} Tus últimos cambios NO se guardaron.`
+        );
+        return;
+      }
+      knownRequestIdsRef.current = new Set(ids);
+      setMasterDataError((prev) =>
+        prev && prev.startsWith('Sincronización de Recaudación:') ? null : prev
+      );
+      // Refresca SOLO los movimientos desde el servidor para reflejar la
+      // reconciliación atómica (identificar/liberar). NO refrescamos las
+      // solicitudes: su estado lo maneja el cliente y ya se persistió con el PUT;
+      // refrescarlas pisaría cambios optimistas aún no sincronizados (causaba que
+      // una solicitud recién validada "volviera" a Pendiente/Preaprobado).
+      try {
+        const movRes = await fetch('/api/cartola/movements', { cache: 'no-store' });
+        if (movRes.ok) {
+          const fresh = (await movRes.json()) as { movements: CartolaMovement[] };
+          suppressCartolaSyncRef.current = true;
+          knownMovementIdsRef.current = new Set((fresh.movements ?? []).map((m) => m.movementId));
+          setMovements(fresh.movements ?? []);
+        }
+      } catch {
+        /* refresh best-effort */
+      }
+    } catch {
+      setMasterDataError('Sincronización de Recaudación: error de red. Tus últimos cambios NO se guardaron.');
+    } finally {
+      recaudacionSyncInFlightRef.current = false;
+      if (recaudacionSyncDirtyRef.current) {
+        recaudacionSyncDirtyRef.current = false;
+        void syncRecaudacion(requestsRef.current);
+      }
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!businessDataLoadedRef.current || currentStatus !== 'authenticated') return;
+    if (suppressRecaudacionSyncRef.current) {
+      suppressRecaudacionSyncRef.current = false;
+      return;
+    }
+    const timeout = window.setTimeout(() => {
+      void syncRecaudacion(requestsRef.current);
     }, 600);
 
     return () => window.clearTimeout(timeout);
-  }, [currentStatus, requests]);
+  }, [currentStatus, requests, syncRecaudacion]);
 
   useEffect(() => {
     if (!businessDataLoadedRef.current || currentStatus !== 'authenticated') return;
     const timeout = window.setTimeout(() => {
       const ids = cobranzaDocs.map((d) => d.id);
       if (ids.length === 0) return;
-      fetch('/api/cobranza/documents', {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ documents: cobranzaDocs, knownIds: Array.from(knownDocIdsRef.current) }),
-      })
-        .then((res) => {
-          if (res.ok) knownDocIdsRef.current = new Set(ids);
-          else setMasterDataError('No fue posible sincronizar Cobranza.');
-        })
-        .catch(() => setMasterDataError('No fue posible sincronizar Cobranza.'));
+      void (async () => {
+        try {
+          const res = await fetch('/api/cobranza/documents', {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              documents: cobranzaDocs,
+              knownIds: Array.from(knownDocIdsRef.current),
+            }),
+          });
+          if (res.ok) {
+            knownDocIdsRef.current = new Set(ids);
+            setMasterDataError((prev) =>
+              prev && prev.startsWith('Sincronización de Cobranza:') ? null : prev
+            );
+          } else {
+            const data = (await res.json().catch(() => ({}))) as { error?: string };
+            setMasterDataError(
+              `Sincronización de Cobranza: ${data.error ?? 'no fue posible guardar.'} Tus últimos cambios NO se guardaron.`
+            );
+          }
+        } catch {
+          setMasterDataError(
+            'Sincronización de Cobranza: error de red. Tus últimos cambios NO se guardaron.'
+          );
+        }
+      })();
     }, 600);
 
     return () => window.clearTimeout(timeout);

@@ -98,11 +98,14 @@ export async function PUT(request: Request) {
   for (const document of parsed.data.documents) {
     const total = round2(document.totalAmount);
     if (document.subDocuments.length > 0) {
+      // Detalle PNR OPCIONAL e incremental: solo rechazamos si la suma EXCEDE el
+      // total del documento (sobre-detalle). Permitir carga parcial habilita
+      // cargar PNRs de a poco / por lotes sin que el guardado falle.
       const itemsSum = round2(document.subDocuments.reduce((sum, item) => sum + item.amount, 0));
-      if (Math.abs(itemsSum - total) > EPS) {
+      if (itemsSum - total > EPS) {
         return NextResponse.json(
           {
-            error: `Documento ${document.id}: la suma de PNR (${itemsSum}) no cuadra con el total (${total}).`,
+            error: `Documento ${document.id}: la suma de PNR (${itemsSum}) excede el total (${total}).`,
           },
           { status: 400 }
         );

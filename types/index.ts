@@ -54,7 +54,9 @@ export type CollectionStatus =
   | 'Preaprobado'
   | 'Aprobado'
   | 'Rechazado'
-  | 'InformacionSolicitada';
+  | 'InformacionSolicitada'
+  | 'GestionadoCC'
+  | 'Anulado';
 
 export type RequestAttachment = {
   id: string;
@@ -74,6 +76,12 @@ export type CollectionRequest = {
   attachmentIds?: string[]; // ids recien subidos, para vincular al guardar
   infoRequestComment?: string; // comentario de Recaudacion al solicitar SWIFT/MT103
   infoRequestedAt?: string; // ISO: cuando se solicito informacion
+  // Marcas de tiempo por etapa (informe de tiempos del Agente CC). ISO.
+  createdAt?: string;
+  preapprovedAt?: string;
+  approvedAt?: string;
+  gestionadoCcAt?: string;
+  reversedAt?: string;
   status: CollectionStatus;
   rejectionComment?: string;
   associatedMovementId?: string;

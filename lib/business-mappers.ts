@@ -124,6 +124,12 @@ export function collectionToUi(request: CollectionWithItems): CollectionRequest 
     associatedMovementId: request.associatedMovementId ?? undefined,
     infoRequestComment: request.infoRequestComment ?? undefined,
     infoRequestedAt: request.infoRequestedAt ? request.infoRequestedAt.toISOString() : undefined,
+    // Marcas de tiempo por etapa (informe de tiempos del Agente CC).
+    createdAt: request.createdAt ? request.createdAt.toISOString() : undefined,
+    preapprovedAt: request.preapprovedAt ? request.preapprovedAt.toISOString() : undefined,
+    approvedAt: request.approvedAt ? request.approvedAt.toISOString() : undefined,
+    gestionadoCcAt: request.gestionadoCcAt ? request.gestionadoCcAt.toISOString() : undefined,
+    reversedAt: request.reversedAt ? request.reversedAt.toISOString() : undefined,
     attachments:
       request.attachments?.map((a) => ({
         id: a.id,

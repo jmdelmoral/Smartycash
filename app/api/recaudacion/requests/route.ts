@@ -5,7 +5,13 @@ import { z } from 'zod';
 import { auditAction } from '@/lib/audit';
 import { authOptions } from '@/lib/auth';
 import { canApproveRecaudacion, canRead, canWrite, RECAUDACION_APPROVAL_STATUSES } from '@/lib/authz';
-import { collectionToUi, parseDateInput } from '@/lib/business-mappers';
+import {
+  collectionToUi,
+  moduleFromIdentification,
+  movementStatusFromDocuments,
+  parseDateInput,
+  uiIdentificationToPrisma,
+} from '@/lib/business-mappers';
 import prisma from '@/lib/prisma';
 
 const documentSchema = z.object({
@@ -22,7 +28,15 @@ const requestSchema = z.object({
   amount: z.coerce.number().positive(),
   clientId: z.string().min(1),
   supportFileName: z.string().optional().default(''),
-  status: z.enum(['Pendiente', 'Preaprobado', 'Aprobado', 'Rechazado', 'InformacionSolicitada']),
+  status: z.enum([
+    'Pendiente',
+    'Preaprobado',
+    'Aprobado',
+    'Rechazado',
+    'InformacionSolicitada',
+    'GestionadoCC',
+    'Anulado',
+  ]),
   rejectionComment: z.string().optional(),
   authorizationCode: z.string().trim().optional(),
   infoRequestComment: z.string().optional(),
@@ -47,8 +61,9 @@ export async function GET() {
     return NextResponse.json({ error: 'Sin permisos' }, { status: 403 });
   }
 
+  // Devolvemos TODAS (incluidas anuladas). El filtro de Estado del cliente decide
+  // si se muestran o no; por defecto la vista las oculta.
   const requests = await prisma.collectionRequest.findMany({
-    where: { status: { not: 'Anulado' } },
     include: { supportFile: true, items: true, attachments: true },
     orderBy: [{ createdAt: 'desc' }],
   });
@@ -118,6 +133,84 @@ export async function PUT(request: Request) {
             error: `Solicitud ${item.id}: la suma de PNR (${docsSum}) no cuadra con el monto (${round2Rec(item.amount)}).`,
           },
           { status: 400 }
+        );
+      }
+    }
+  }
+
+  // Comprobante OBLIGATORIO: una solicitud no puede quedar Preaprobada ni
+  // Aprobada sin al menos un comprobante adjunto. (La carga masiva entra como
+  // Pendiente sin comprobante; al adjuntarlo luego recién puede preaprobarse.)
+  const approvalItems = parsed.data.requests.filter(
+    (r) => r.status === 'Preaprobado' || r.status === 'Aprobado'
+  );
+  if (approvalItems.length > 0) {
+    // Solo exigimos comprobante en TRANSICIONES NUEVAS a aprobación. Re-validar
+    // registros que ya estaban Preaprobados/Aprobados bloquearía todo el lote en
+    // cada sincronización (deadlock) si alguno quedó sin comprobante de antes.
+    const prev = await prisma.collectionRequest.findMany({
+      where: { id: { in: approvalItems.map((r) => r.id) } },
+      select: { id: true, status: true },
+    });
+    const prevStatus = new Map(prev.map((p) => [p.id, p.status as string]));
+    const newlyApproving = approvalItems.filter((r) => {
+      const before = prevStatus.get(r.id);
+      return before !== 'Preaprobado' && before !== 'Aprobado';
+    });
+    if (newlyApproving.length > 0) {
+      const linked = await prisma.supportFile.findMany({
+        where: { collectionRequestId: { in: newlyApproving.map((r) => r.id) } },
+        select: { collectionRequestId: true },
+      });
+      const linkedByReq = new Map<string, number>();
+      for (const f of linked) {
+        if (f.collectionRequestId) {
+          linkedByReq.set(f.collectionRequestId, (linkedByReq.get(f.collectionRequestId) ?? 0) + 1);
+        }
+      }
+      for (const r of newlyApproving) {
+        const incoming = r.attachmentIds?.length ?? 0;
+        const existing = linkedByReq.get(r.id) ?? 0;
+        if (incoming + existing === 0) {
+          return NextResponse.json(
+            {
+              error: `La solicitud ${r.id} requiere al menos un comprobante adjunto para preaprobar o aprobar.`,
+            },
+            { status: 400 }
+          );
+        }
+      }
+    }
+  }
+
+  // Gate de CIERRE CONTABLE: un movimiento CerradoDefinitivo solo puede ser
+  // tocado (reconciliar/liberar) por Contabilidad/Admin. Otros roles deben pedir
+  // primero a Contabilidad que lo reabra. Solo bloquea transiciones reales de
+  // estado (re-sincronizar filas sin cambios sigue permitido).
+  const movLinkedItems = parsed.data.requests.filter((r) => r.associatedMovementId);
+  if (movLinkedItems.length > 0 && !canRead(session, 'Contabilidad')) {
+    const movIds = [...new Set(movLinkedItems.map((r) => r.associatedMovementId!))];
+    const closedMovs = await prisma.cartolaMovement.findMany({
+      where: { id: { in: movIds }, closeState: 'CerradoDefinitivo' },
+      select: { id: true, displayId: true },
+    });
+    if (closedMovs.length > 0) {
+      const closedSet = new Set(closedMovs.map((m) => m.id));
+      const prevAll = await prisma.collectionRequest.findMany({
+        where: { id: { in: movLinkedItems.map((r) => r.id) } },
+        select: { id: true, status: true },
+      });
+      const prevMap = new Map(prevAll.map((p) => [p.id, p.status as string]));
+      const offending = movLinkedItems.find(
+        (r) => closedSet.has(r.associatedMovementId!) && prevMap.get(r.id) !== r.status
+      );
+      if (offending) {
+        const mv = closedMovs.find((m) => m.id === offending.associatedMovementId);
+        return NextResponse.json(
+          {
+            error: `El movimiento ${mv?.displayId ?? offending.associatedMovementId} está CERRADO contablemente. Solo Contabilidad puede reversarlo/reabrirlo primero.`,
+          },
+          { status: 403 }
         );
       }
     }
@@ -228,6 +321,21 @@ export async function PUT(request: Request) {
           ? new Date()
           : undefined;
 
+      // Marcas de tiempo por etapa: se setean al ENTRAR a la etapa (transición).
+      // undefined = no tocar (así re-sincronizar filas sin cambios no las pisa).
+      const nowTs = new Date();
+      const preapprovedAt =
+        item.status === 'Preaprobado' && previous?.status !== 'Preaprobado' ? nowTs : undefined;
+      const approvedAt =
+        item.status === 'Aprobado' && previous?.status !== 'Aprobado' ? nowTs : undefined;
+      const gestionadoCcAt =
+        item.status === 'GestionadoCC' && previous?.status !== 'GestionadoCC' ? nowTs : undefined;
+      const reversedAt =
+        (previous?.status === 'Aprobado' || previous?.status === 'GestionadoCC') &&
+        (item.status === 'InformacionSolicitada' || item.status === 'Pendiente')
+          ? nowTs
+          : undefined;
+
       const supportFile = item.supportFileName
         ? await tx.supportFile.create({
             data: {
@@ -252,6 +360,10 @@ export async function PUT(request: Request) {
           authorizationCode: item.authorizationCode ?? null,
           infoRequestComment: item.infoRequestComment ?? null,
           infoRequestedAt,
+          preapprovedAt,
+          approvedAt,
+          gestionadoCcAt,
+          reversedAt,
           reviewedById:
             item.status === 'Aprobado' || item.status === 'Rechazado' ? session.user.id : undefined,
           reviewedAt:
@@ -271,6 +383,10 @@ export async function PUT(request: Request) {
           authorizationCode: item.authorizationCode ?? null,
           infoRequestComment: item.infoRequestComment ?? null,
           infoRequestedAt,
+          preapprovedAt,
+          approvedAt,
+          gestionadoCcAt,
+          reversedAt,
           createdById: session.user.id,
           reviewedById:
             item.status === 'Aprobado' || item.status === 'Rechazado' ? session.user.id : undefined,
@@ -285,6 +401,65 @@ export async function PUT(request: Request) {
           where: { id: { in: item.attachmentIds } },
           data: { collectionRequestId: item.id },
         });
+      }
+
+      // Reconciliación ATÓMICA del movimiento de cartola asociado (misma
+      // transacción que la solicitud). Así el movimiento SOLO queda identificado
+      // si la solicitud se guardó, y se libera si la solicitud se rechaza o se
+      // vuelve a pedir información. Elimina la divergencia cartola↔recaudación.
+      if (associatedMovement) {
+        const reconciling =
+          item.status === 'Preaprobado' ||
+          item.status === 'Aprobado' ||
+          item.status === 'GestionadoCC';
+        if (reconciling) {
+          await tx.cartolaMovementAllocation.deleteMany({
+            where: { movementId: associatedMovement.id },
+          });
+          for (const doc of item.documents) {
+            const saleReference = await tx.saleReference.upsert({
+              where: { type_reference: { type: 'PNR', reference: doc.reference } },
+              update: {},
+              create: { type: 'PNR', reference: doc.reference },
+            });
+            await tx.cartolaMovementAllocation.create({
+              data: {
+                movementId: associatedMovement.id,
+                module: moduleFromIdentification('GC'),
+                sourceEntityType: 'CollectionRequest',
+                sourceEntityId: doc.id,
+                saleReferenceId: saleReference.id,
+                amount: doc.amount,
+                detail: doc.detail,
+                createdById: session.user.id,
+              },
+            });
+          }
+          await tx.cartolaMovement.update({
+            where: { id: associatedMovement.id },
+            data: {
+              identificationType: uiIdentificationToPrisma('GC'),
+              status: movementStatusFromDocuments({
+                amount: Number(associatedMovement.amount),
+                documents: item.documents,
+                mainIdentification: 'GC',
+              }),
+            },
+          });
+        } else {
+          // Cualquier estado no-aprobación (Rechazado, InformacionSolicitada o
+          // Pendiente por una reversa): el movimiento vuelve a "por identificar".
+          await tx.cartolaMovementAllocation.deleteMany({
+            where: { movementId: associatedMovement.id },
+          });
+          await tx.cartolaMovement.update({
+            where: { id: associatedMovement.id },
+            data: {
+              identificationType: uiIdentificationToPrisma('Sin identificar'),
+              status: 'Unidentified',
+            },
+          });
+        }
       }
 
       if (!previous) {
@@ -373,7 +548,7 @@ export async function PUT(request: Request) {
       },
       tx
     );
-  });
+  }, { timeout: 30000, maxWait: 15000 });
 
   return NextResponse.json({ ok: true });
 }

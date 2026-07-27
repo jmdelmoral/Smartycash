@@ -242,6 +242,11 @@ model CollectionRequest {
   authorizationCode    String? // codigo de autorizacion (alfanumerico) del comprobante bancario
   infoRequestComment   String? // comentario de Recaudacion al solicitar SWIFT/MT103
   infoRequestedAt      DateTime? // cuando Recaudacion solicito informacion adicional
+  // Marcas de tiempo por etapa (para el informe de tiempos del Agente CC).
+  preapprovedAt        DateTime? // primera vez que llego a Preaprobado
+  approvedAt           DateTime? // primera vez que llego a Aprobado
+  gestionadoCcAt       DateTime? // cuando el Agente CC marco Gestionado CC
+  reversedAt           DateTime? // ultima vez que Recaudacion reverso (Aprobado/Gestionado -> revision)
   createdById          String?
   createdBy            User?            @relation("CollectionRequestCreatedBy", fields: [createdById], references: [id], onDelete: SetNull)
   reviewedById         String?
@@ -453,6 +458,7 @@ enum CollectionStatus {
   Rechazado
   Anulado
   InformacionSolicitada
+  GestionadoCC
 }
 
 enum CobranzaDocumentType {

@@ -236,10 +236,22 @@ export function CobranzaManagement({
             throw new Error(`Documento ${docId}: MontoTotal inválido.`);
           }
 
-          const clientId = String(first.ClienteID);
-          if (!clients.some((c) => c.id === clientId)) {
-            throw new Error(`Documento ${docId}: ClienteID ${clientId} no existe.`);
+          // ClienteID puede venir como código App, Navitaire, BP SAP, RUT o id
+          // interno. Match flexible (case-insensitive) y guardamos SIEMPRE el id
+          // interno resuelto (no el valor crudo de la planilla).
+          const clienteRaw = String(first.ClienteID ?? '').trim();
+          const clienteKey = clienteRaw.toUpperCase();
+          const matchedClient = clients.find((c) =>
+            [c.appCode, c.navitaireCode, c.sapBP, c.taxId, c.id]
+              .filter((v): v is string => !!v)
+              .some((v) => v.trim().toUpperCase() === clienteKey)
+          );
+          if (!matchedClient) {
+            throw new Error(
+              `Documento ${docId}: ClienteID "${clienteRaw}" no corresponde a ningún cliente registrado (App/Navitaire/BP SAP/RUT).`
+            );
           }
+          const clientId = matchedClient.id;
 
           // Fecha: acepta dd/mm/yyyy (o yyyy-mm-dd) y normaliza a ISO.
           const rawFecha = String(first.Fecha ?? '').trim();
@@ -533,6 +545,18 @@ export function CobranzaManagement({
       setAddDetailError('El monto debe ser un número positivo.');
       return;
     }
+    // No permitir que la suma de PNRs exceda el total del documento.
+    const targetDoc = cobranzaDocs.find((d) => d.id === selectedDocId);
+    if (targetDoc) {
+      const round2 = (n: number) => Math.round(n * 100) / 100;
+      const existing = targetDoc.subDocuments.reduce((sum, x) => sum + x.amount, 0);
+      if (round2(existing + amount) > round2(targetDoc.totalAmount) + 0.01) {
+        setAddDetailError(
+          `La suma de PNRs ($${round2(existing + amount).toLocaleString()}) excedería el total del documento ($${round2(targetDoc.totalAmount).toLocaleString()}).`
+        );
+        return;
+      }
+    }
     setCobranzaDocs((prev) =>
       prev.map((d) => {
         if (d.id === selectedDocId) {
@@ -615,9 +639,88 @@ export function CobranzaManagement({
     document.body.removeChild(link);
   };
 
+  // Plantilla y carga masiva GENERAL de detalles PNR para VARIAS facturas.
+  // Columnas: DocumentoID, PNR, MontoPNR (agrupa por DocumentoID).
+  const onDownloadPnrDetailsTemplate = () => {
+    const headers = ['DocumentoID', 'PNR', 'MontoPNR'].join(',');
+    const sample = 'FAC-1001,ABC123,3000\nFAC-1001,DEF456,2000\n40004,GHI789,10000';
+    const blob = new Blob([`${headers}\n${sample}\n`], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.setAttribute('download', 'plantilla-detalles-pnr.csv');
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  };
+
+  const onBulkUploadPnrDetails = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    setMassiveDetailError(null);
+    try {
+      const data = await file.arrayBuffer();
+      const workbook = XLSX.read(data);
+      const rows = XLSX.utils.sheet_to_json<any>(workbook.Sheets[workbook.SheetNames[0]]);
+      if (rows.length === 0) throw new Error('El archivo no tiene filas.');
+
+      // Agrupar PNRs por DocumentoID.
+      const byDoc = new Map<string, { reference: string; amount: number }[]>();
+      for (const r of rows) {
+        const docId = String(r.DocumentoID ?? '').trim();
+        if (!docId) throw new Error('Hay una fila sin DocumentoID.');
+        if (!r.PNR || String(r.PNR).toLowerCase() === 'undefined') {
+          throw new Error(`Documento ${docId}: falta PNR en una fila.`);
+        }
+        const amt = Number(r.MontoPNR);
+        if (!Number.isFinite(amt) || amt <= 0) {
+          throw new Error(`Documento ${docId}: MontoPNR inválido para PNR ${r.PNR}.`);
+        }
+        const arr = byDoc.get(docId) ?? [];
+        arr.push({ reference: String(r.PNR).toUpperCase(), amount: amt });
+        byDoc.set(docId, arr);
+      }
+
+      // Validar existencia y que no se exceda el total por documento.
+      const round2 = (n: number) => Math.round(n * 100) / 100;
+      for (const [docId, pnrs] of byDoc) {
+        const doc = cobranzaDocs.find((d) => d.id === docId);
+        if (!doc) throw new Error(`El documento ${docId} no existe.`);
+        const existingSum = doc.subDocuments.reduce((sum, x) => sum + x.amount, 0);
+        const addSum = pnrs.reduce((sum, x) => sum + x.amount, 0);
+        if (round2(existingSum + addSum) > round2(doc.totalAmount) + 0.01) {
+          throw new Error(
+            `Documento ${docId}: los PNRs (${round2(existingSum + addSum)}) exceden el total (${round2(doc.totalAmount)}).`
+          );
+        }
+      }
+
+      // Aplicar a cada documento.
+      setCobranzaDocs((prev) =>
+        prev.map((doc) => {
+          const pnrs = byDoc.get(doc.id);
+          if (!pnrs) return doc;
+          const newSubs = pnrs.map((p) => ({
+            id: `SUB-${Math.random()}`,
+            reference: p.reference,
+            amount: p.amount,
+            detail: 'Carga Masiva Detalles PNR',
+          }));
+          return { ...doc, subDocuments: [...doc.subDocuments, ...newSubs] };
+        })
+      );
+      alert(`Se cargaron detalles PNR en ${byDoc.size} documento(s).`);
+    } catch (err: any) {
+      setMassiveDetailError(err.message || 'Error al cargar detalles PNR.');
+      alert(err.message || 'Error al cargar detalles PNR.');
+    } finally {
+      event.target.value = '';
+    }
+  };
+
   const onDownloadPaymentsTemplate = () => {
     const headers = ['DocumentoID', 'MovimientoID', 'Monto'].join(';');
-    const sample = 'FAC-1001;MOV-20240521-X1Y2;50000';
+    const sample = 'FAC-1001;CL-BAN-5678-202606-000123;50000';
     const blob = new Blob([`${headers}\n${sample}\n`], { type: 'text/csv;charset=utf-8;' });
     const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
@@ -684,12 +787,18 @@ export function CobranzaManagement({
         let paymentSource: { amount: number; date: string; bank: string } | null = null;
         let isBankMovement = false;
 
-        // 1. Intentar buscar en Cartola Bancaria
-        const mIdx = updatedMovements.findIndex((m) => m.movementId === movId);
-        if (mIdx !== -1 && (movementBalances.get(movId) || 0) > 0.01) {
-          // Check for available balance
+        // 1. Intentar buscar en Cartola Bancaria (por código visible CL-BAN... o id interno)
+        const mIdx = updatedMovements.findIndex(
+          (m) => m.movementId === movId || m.displayId === movId
+        );
+        const canonMovId = mIdx !== -1 ? updatedMovements[mIdx].movementId : movId;
+        if (mIdx !== -1 && (movementBalances.get(canonMovId) || 0) > 0.01) {
           const mov = updatedMovements[mIdx];
-          paymentSource = { amount: movementBalances.get(movId)!, date: mov.date, bank: mov.bank };
+          paymentSource = {
+            amount: movementBalances.get(canonMovId)!,
+            date: mov.date,
+            bank: mov.bank,
+          };
           isBankMovement = true;
         }
         // 2. Si no es banco, intentar buscar en Notas de Crédito
@@ -699,7 +808,8 @@ export function CobranzaManagement({
           paymentSource = { amount: ncBalances.get(movId)!, date: nc.date, bank: 'Aplicación NC' };
         }
 
-        if (paymentSource && !doc.payments.some((p) => p.movementId === movId)) {
+        const sourceKey = isBankMovement ? canonMovId : movId;
+        if (paymentSource && !doc.payments.some((p) => p.movementId === sourceKey)) {
           // El monto a aplicar es el menor entre: lo solicitado, lo disponible en la fuente, o lo que debe el documento
           let appliedAmount = Math.min(paymentSource.amount, doc.pendingAmount);
           if (requestedAmount !== null) {
@@ -726,7 +836,7 @@ export function CobranzaManagement({
             payments: [
               ...doc.payments,
               {
-                movementId: movId,
+                movementId: sourceKey,
                 amount: appliedAmount,
                 date: paymentSource.date,
                 bank: paymentSource.bank,
@@ -736,7 +846,7 @@ export function CobranzaManagement({
 
           // Actualizar Saldo de la fuente (Banco o NC)
           if (isBankMovement) {
-            movementBalances.set(movId, paymentSource.amount - appliedAmount);
+            movementBalances.set(canonMovId, paymentSource.amount - appliedAmount);
 
             // Importante: Agregar el detalle del documento al movimiento bancario para la pestaña de Cartola
             const currentMov = updatedMovements[mIdx];
@@ -803,6 +913,25 @@ export function CobranzaManagement({
               <label className="flex items-center px-2 h-7 bg-slate-50 hover:bg-slate-100 rounded border cursor-pointer text-[10px] font-medium">
                 Carga Invoices{' '}
                 <input type="file" className="hidden" onChange={onMassUploadCobranza} />
+              </label>
+            </div>
+            <div className="flex gap-1 items-center border rounded-lg p-1 bg-white">
+              <Button
+                variant="ghost"
+                size="sm"
+                className="text-[10px] h-7"
+                onClick={onDownloadPnrDetailsTemplate}
+              >
+                Template Detalles PNR
+              </Button>
+              <label className="flex items-center px-2 h-7 bg-slate-50 hover:bg-slate-100 rounded border cursor-pointer text-[10px] font-medium">
+                Carga Detalles PNR{' '}
+                <input
+                  type="file"
+                  accept=".csv,.xlsx,.xls"
+                  className="hidden"
+                  onChange={onBulkUploadPnrDetails}
+                />
               </label>
             </div>
             <div className="flex gap-1 items-center border border-emerald-200 rounded-lg p-1 bg-emerald-50/30">
@@ -912,7 +1041,7 @@ export function CobranzaManagement({
                 />
               </div>
               <div className="md:col-span-3 pt-5">
-                <Button className="w-full h-9 bg-jetsmart-blue" onClick={generateEdoCuenta}>
+                <Button className="w-full h-9" onClick={generateEdoCuenta}>
                   Exportar Excel Point-in-time
                 </Button>
               </div>
@@ -1019,9 +1148,8 @@ export function CobranzaManagement({
                         </Button>
                         {d.status !== 'Pagado' && (
                           <Button
-                            variant="outline"
                             size="sm"
-                            className="h-8 text-[10px] border-emerald-200 text-emerald-700 hover:bg-emerald-50"
+                            className="h-8 text-[10px] bg-emerald-600 text-white border-emerald-600 hover:bg-emerald-700"
                             onClick={() => {
                               setSelectedDocId(d.id);
                               setIsPaymentModalOpen(true);
@@ -1062,36 +1190,43 @@ export function CobranzaManagement({
                 </div>
               ))
             )}
-            <div className="flex gap-2">
+            <div className="mt-2">
               <Button
                 variant="outline"
                 size="sm"
-                className="w-full text-[10px] mt-2 border-dashed"
+                className="w-full text-[10px] border-dashed"
                 onClick={() => setIsAddDetailModalOpen(true)}
               >
                 + Agregar PNR / Detalle Manual
               </Button>
-              <label className="flex items-center justify-center px-3 py-1.5 bg-slate-100 rounded-md cursor-pointer hover:bg-slate-200 transition-colors text-[10px] font-medium border border-slate-200">
-                Carga Masiva PNRs{' '}
-                <input type="file" className="hidden" onChange={onMassUploadSubDocuments} />
-              </label>
+              <p className="mt-1 text-[10px] text-slate-400 italic">
+                Para cargar PNRs de varias facturas a la vez, usa &quot;Carga Detalles PNR&quot; en la
+                barra superior.
+              </p>
             </div>
-            {massiveDetailError && (
-              <p className="text-xs text-red-600 mt-2">{massiveDetailError}</p>
-            )}
-            <div className="pt-3 border-t flex justify-between font-bold text-lg">
-              <span>Total</span>
-              <span>
-                $
-                {currentViewingDoc?.subDocuments
-                  .reduce((a, b) => a + b.amount, 0)
-                  .toLocaleString() || 0}
-              </span>
-            </div>
-            <div className="text-xs text-slate-500">
-              Monto Total Documento: $
-              {cobranzaDocs.find((d) => d.id === selectedDocId)?.totalAmount.toLocaleString()}
-            </div>
+            {(() => {
+              const sum = currentViewingDoc?.subDocuments.reduce((a, b) => a + b.amount, 0) ?? 0;
+              const total = currentViewingDoc?.totalAmount ?? 0;
+              const excede = Math.round(sum * 100) / 100 > Math.round(total * 100) / 100 + 0.01;
+              return (
+                <>
+                  <div
+                    className={`pt-3 border-t flex justify-between font-bold text-lg ${excede ? 'text-red-600' : ''}`}
+                  >
+                    <span>Total</span>
+                    <span>${sum.toLocaleString()}</span>
+                  </div>
+                  <div className="text-xs text-slate-500">
+                    Monto Total Documento: ${total.toLocaleString()}
+                  </div>
+                  {excede && (
+                    <p className="text-xs text-red-600 mt-1">
+                      La suma de PNRs excede el total del documento.
+                    </p>
+                  )}
+                </>
+              );
+            })()}
           </div>
           <DialogFooter>
             <Button onClick={() => setIsSubDocsModalOpen(false)}>Cerrar</Button>

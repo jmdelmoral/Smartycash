@@ -264,16 +264,31 @@ export function BankStatementManagement({
   };
 
   const onExportDocumentDetails = () => {
-    const data = movements.flatMap((m) =>
-      m.documents.map((d) => ({
-        MovimientoID: m.displayId || m.movementId,
-        Banco: m.bank,
-        Cuenta: m.bankAccount,
-        Referencia: d.reference,
-        Monto: d.amount,
-        Detalle: d.detail,
-        Tipo: m.mainIdentification,
-      }))
+    // Usa la MISMA lista filtrada que la tabla. Los movimientos CON PNR salen una
+    // fila por PNR; los SIN PNR (no identificados) salen igual con una fila
+    // (Referencia vacía y su monto), para que el export quede completo.
+    const data = prioritizedMovements.flatMap((m) =>
+      m.documents.length > 0
+        ? m.documents.map((d) => ({
+            MovimientoID: m.displayId || m.movementId,
+            Banco: m.bank,
+            Cuenta: m.bankAccount,
+            Referencia: d.reference,
+            Monto: d.amount,
+            Detalle: d.detail,
+            Tipo: m.mainIdentification,
+          }))
+        : [
+            {
+              MovimientoID: m.displayId || m.movementId,
+              Banco: m.bank,
+              Cuenta: m.bankAccount,
+              Referencia: '',
+              Monto: m.amount,
+              Detalle: '(sin detalle)',
+              Tipo: m.mainIdentification,
+            },
+          ]
     );
     const ws = XLSX.utils.json_to_sheet(data);
     const wb = XLSX.utils.book_new();
