@@ -49,6 +49,9 @@ export function RecaudacionManagement({
   onReconcile,
 }: RecaudacionManagementProps) {
   const [manualMatchMovId, setManualMatchMovId] = useState<Record<string, string>>({});
+  // D 2b: candidatos de movimiento traidos del servidor bajo demanda
+  // (reemplaza el filtrado sobre la lista completa `movements`).
+  const [candidatesByReq, setCandidatesByReq] = useState<Record<string, CartolaMovement[]>>({});
   // Filtros del panel (delimitan tabla Y export).
   const [fEstado, setFEstado] = useState<string>('all');
   const [fCliente, setFCliente] = useState<string>('all');
@@ -105,6 +108,22 @@ export function RecaudacionManagement({
 
   const generateRequestId = () =>
     `REQ-${Date.now()}-${Math.random().toString(36).slice(2, 5).toUpperCase()}`;
+
+  // D 2b: consulta candidatos 'Sin identificar' al servidor (monto +/-1),
+  // sin depender de tener toda la cartola cargada en el cliente.
+  const loadCandidates = async (req: CollectionRequest) => {
+    try {
+      const res = await fetch(
+        `/api/cartola/movements/candidates?amount=${encodeURIComponent(req.amount)}`,
+        { cache: 'no-store' }
+      );
+      if (!res.ok) return;
+      const body = (await res.json()) as { candidates?: CartolaMovement[] };
+      setCandidatesByReq((prev) => ({ ...prev, [req.id]: body.candidates ?? [] }));
+    } catch {
+      // silencioso: si falla, el selector queda vacio y se puede reintentar
+    }
+  };
 
   const onAddPnr = () => {
     // Validación alfanumérica de 6 caracteres
@@ -1215,14 +1234,10 @@ export function RecaudacionManagement({
                                     [r.id]: e.target.value,
                                   })
                                 }
+                                onFocus={() => loadCandidates(r)}
                               >
                                 <option value="">Vincular Movimiento...</option>
-                                {movements
-                                  .filter(
-                                    (m) =>
-                                      m.mainIdentification === 'Sin identificar' &&
-                                      Math.abs(m.amount - r.amount) < 1
-                                  )
+                                {(candidatesByReq[r.id] ?? [])
                                   .map((m) => (
                                     <option key={m.movementId} value={m.movementId}>
                                       {m.date} - {m.bank} (${m.amount.toLocaleString()})
