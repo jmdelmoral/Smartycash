@@ -59,6 +59,11 @@ export function CobranzaManagement({
   const [selectedDocId, setSelectedDocId] = useState<string | null>(null);
   const [viewingSubDocs, setViewingSubDocs] = useState<CartolaDocument[]>([]);
   const [paymentMovId, setPaymentMovId] = useState('');
+  // D 4b-1: fuentes de pago (abonos con saldo) traídas del servidor, sin depender
+  // del array compartido de movimientos.
+  const [bankSources, setBankSources] = useState<(CartolaMovement & { availableAmount: number })[]>(
+    []
+  );
   const [isPayDetailModalOpen, setIsPayDetailModalOpen] = useState(false);
   const [selectedDocForDetails, setSelectedDocForDetails] = useState<CobranzaMainDocument | null>(
     null
@@ -338,6 +343,19 @@ export function CobranzaManagement({
     }
   };
 
+  const loadBankSources = async () => {
+    try {
+      const res = await fetch('/api/cartola/movements/payment-sources', { cache: 'no-store' });
+      if (!res.ok) return;
+      const data = (await res.json()) as {
+        sources?: (CartolaMovement & { availableAmount: number })[];
+      };
+      setBankSources(data.sources ?? []);
+    } catch {
+      // silencioso: si falla, el selector queda vacío y se puede reintentar
+    }
+  };
+
   const onAssociatePayment = () => {
     if (!selectedDocId || !paymentMovId) return;
 
@@ -366,11 +384,10 @@ export function CobranzaManagement({
     }
 
     if (paymentSourceType === 'bank') {
-      const movement = movements.find((m) => m.movementId === paymentMovId);
-      if (!movement) return;
-
-      const usedAmount = movement.documents.reduce((sum, d) => sum + d.amount, 0);
-      const availableInBank = movement.amount - usedAmount;
+      // D 4b-1: la fuente y su saldo disponible vienen del endpoint (bankSources).
+      const source = bankSources.find((m) => m.movementId === paymentMovId);
+      if (!source) return;
+      const availableInBank = source.availableAmount;
 
       if (amountToApply > availableInBank + 0.01) {
         alert(
@@ -396,10 +413,10 @@ export function CobranzaManagement({
                 payments: [
                   ...doc.payments,
                   {
-                    movementId: movement.movementId,
+                    movementId: source.movementId,
                     amount: amountToApply,
-                    date: movement.date,
-                    bank: movement.bank,
+                    date: source.date,
+                    bank: source.bank,
                   },
                 ],
               }
@@ -1345,6 +1362,7 @@ export function CobranzaManagement({
                             onClick={() => {
                               setSelectedDocId(d.id);
                               setIsPaymentModalOpen(true);
+                              void loadBankSources();
                             }}
                           >
                             Asociar Pago
@@ -1579,6 +1597,7 @@ export function CobranzaManagement({
               onClick={() => {
                 setPaymentSourceType('bank');
                 setPaymentMovId('');
+                void loadBankSources();
               }}
             >
               Movimiento Bancario
@@ -1608,26 +1627,12 @@ export function CobranzaManagement({
               >
                 <option value="">Seleccionar...</option>
                 {paymentSourceType === 'bank'
-                  ? movements
-                      .filter((m) => {
-                        const used = m.documents.reduce((s, d) => s + d.amount, 0);
-                        // Mostrar si no tiene tipo o si es de cobranza pero aún le queda saldo
-                        return (
-                          (m.mainIdentification === 'Sin identificar' ||
-                            m.mainIdentification === 'Cobranza crédito') &&
-                          used < m.amount - 0.01
-                        );
-                      })
-                      .map((m) => {
-                        const used = m.documents.reduce((s, d) => s + d.amount, 0);
-                        const available = m.amount - used;
-                        return (
-                          <option key={m.movementId} value={m.movementId}>
-                            {formatDate(m.date)} - {m.bank} (Disp: ${available.toLocaleString()} / Total: $
-                            {m.amount.toLocaleString()})
-                          </option>
-                        );
-                      })
+                  ? bankSources.map((m) => (
+                      <option key={m.movementId} value={m.movementId}>
+                        {formatDate(m.date)} - {m.bank} (Disp: ${m.availableAmount.toLocaleString()} /
+                        Total: ${m.amount.toLocaleString()})
+                      </option>
+                    ))
                   : cobranzaDocs
                       .filter(
                         (d) =>
