@@ -137,6 +137,9 @@ export function BankStatementManagement({
   const [accountFilter, setAccountFilter] = useState<string>('all');
   const [countryFilter, setCountryFilter] = useState<string>('all');
   const [typeFilter, setTypeFilter] = useState<string>('all');
+  const [dateFromFilter, setDateFromFilter] = useState<string>('');
+  const [dateToFilter, setDateToFilter] = useState<string>('');
+  const [searchFilter, setSearchFilter] = useState<string>('');
 
   // Edición de valores de movimiento (solo "Sin identificar").
   const [editMov, setEditMov] = useState<CartolaMovement | null>(null);
@@ -196,15 +199,51 @@ export function BankStatementManagement({
     [movements]
   );
 
+  const toIsoDay = (v: string): string => {
+    const raw = String(v ?? '').trim();
+    const ymd = /^(\d{4})-(\d{2})-(\d{2})/.exec(raw);
+    if (ymd) return `${ymd[1]}-${ymd[2]}-${ymd[3]}`;
+    const dmy = /^(\d{2})[/-](\d{2})[/-](\d{4})$/.exec(raw);
+    if (dmy) return `${dmy[3]}-${dmy[2]}-${dmy[1]}`;
+    return raw;
+  };
+
   const filteredMovements = useMemo(() => {
+    const q = searchFilter.trim().toLowerCase();
     return movements.filter((m) => {
       const matchBank = bankFilter === 'all' || m.bank === bankFilter;
       const matchAccount = accountFilter === 'all' || m.bankAccount === accountFilter;
       const matchCountry = countryFilter === 'all' || m.country === countryFilter;
       const matchType = typeFilter === 'all' || m.mainIdentification === typeFilter;
-      return matchBank && matchAccount && matchCountry && matchType;
+      const day = toIsoDay(m.date);
+      const matchFrom = !dateFromFilter || day >= dateFromFilter;
+      const matchTo = !dateToFilter || day <= dateToFilter;
+      const matchSearch =
+        !q ||
+        [
+          m.displayId,
+          m.movementId,
+          m.description,
+          m.bank,
+          m.bankAccount,
+          ...m.documents.map((d) => d.reference),
+        ]
+          .filter(Boolean)
+          .join(' ')
+          .toLowerCase()
+          .includes(q);
+      return matchBank && matchAccount && matchCountry && matchType && matchFrom && matchTo && matchSearch;
     });
-  }, [movements, bankFilter, accountFilter, countryFilter, typeFilter]);
+  }, [
+    movements,
+    bankFilter,
+    accountFilter,
+    countryFilter,
+    typeFilter,
+    dateFromFilter,
+    dateToFilter,
+    searchFilter,
+  ]);
 
   const unidentifiedCount = useMemo(
     () => filteredMovements.filter((m) => m.mainIdentification === 'Sin identificar').length,
@@ -235,7 +274,10 @@ export function BankStatementManagement({
   }, [prioritizedMovements, currentPage]);
 
   // Reset page when filters change
-  useMemo(() => setCurrentPage(1), [bankFilter, accountFilter, countryFilter, typeFilter]);
+  useMemo(
+    () => setCurrentPage(1),
+    [bankFilter, accountFilter, countryFilter, typeFilter, dateFromFilter, dateToFilter, searchFilter]
+  );
 
   const pendingUploadTotalAmount = useMemo(
     () => pendingUploadMovements.reduce((acc, m) => acc + m.amount, 0),
@@ -838,6 +880,34 @@ export function BankStatementManagement({
                 </option>
               ))}
             </select>
+          </div>
+          <div className="flex flex-col gap-1">
+            <label className="text-xs font-medium text-slate-500">Fecha desde</label>
+            <input
+              type="date"
+              className="h-9 rounded-md border bg-white px-2 text-sm"
+              value={dateFromFilter}
+              onChange={(e) => setDateFromFilter(e.target.value)}
+            />
+          </div>
+          <div className="flex flex-col gap-1">
+            <label className="text-xs font-medium text-slate-500">Fecha hasta</label>
+            <input
+              type="date"
+              className="h-9 rounded-md border bg-white px-2 text-sm"
+              value={dateToFilter}
+              onChange={(e) => setDateToFilter(e.target.value)}
+            />
+          </div>
+          <div className="flex flex-col gap-1 sm:col-span-2">
+            <label className="text-xs font-medium text-slate-500">Buscar (ID / descripción / PNR)</label>
+            <input
+              type="text"
+              className="h-9 rounded-md border bg-white px-2 text-sm"
+              value={searchFilter}
+              onChange={(e) => setSearchFilter(e.target.value)}
+              placeholder="Ej. CL-BAN… / abono / ABC123"
+            />
           </div>
         </div>
 
