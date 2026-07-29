@@ -5,6 +5,26 @@
 > (endpoint de fuentes de pago), 4b-1 (selector/validación de pago desde el endpoint).
 > Pendiente → **4b-2**, **4c**, **Fase 5** (deben hacerse juntos; ver más abajo).
 
+## Hallazgo confirmado en vivo (endpoints hechos; cableado de cliente revertido)
+
+- Los endpoints `POST /api/cobranza/payments` (aplicar) y `/reverse` están HECHOS,
+  VALIDADOS por API y COMMITEADOS (`0fc665b`). La reversa acepta `paymentId` **o**
+  `{documentId, movementId, amount}` (la UI del pago no expone el id). Casos probados:
+  aplicar parcial, reversar, **dos facturas sobre un mismo movimiento** (acumulación),
+  y restauración total de saldos. El math de plata cuadra.
+- **BLOQUEANTE confirmado**: cablear el cliente a estos endpoints con el sync de
+  documentos vivo **corrompe** la conciliación. Motivo: `refreshDocuments()` hace
+  `setCobranzaDocs(...)` → dispara el efecto de sync de documentos de `page.tsx` →
+  `PUT /api/cobranza/documents` → `payment.deleteMany` + recrea los pagos **sin**
+  `allocationId`. Entonces el pago creado por el endpoint (enlazado a su asignación) se
+  recrea perdiendo el vínculo, y una reversa posterior **deja la asignación colgada** en
+  el movimiento (saldo mal). Por eso el cableado de cliente (4c) se **revirtió**.
+- **Prerequisito duro antes de cablear el cliente**: el `PUT /api/cobranza/documents`
+  debe **dejar de crear/borrar `Payment`** (los pagos pasan a ser responsabilidad
+  EXCLUSIVA de los endpoints `payments`/`reverse`). Recién entonces se cablea el cliente
+  y se quita el array/sync compartido (Fase 5). Todo esto va en una sola corrida, con la
+  matriz de pruebas y la app estable.
+
 ## Por qué 4b-2 y Fase 5 van JUNTOS (bloqueador del "pisado")
 
 Hoy dos sistemas escriben sobre el mismo movimiento de cartola:
