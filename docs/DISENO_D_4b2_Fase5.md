@@ -93,6 +93,28 @@ En una transacción:
 > (o dejar de enviar `payments` en el sync de documentos) para no tener dos fuentes de
 > verdad de los pagos. Definir esto explícitamente antes de codear.
 
+## Acoplamientos extra confirmados al planear el prerequisito del PUT
+
+Antes de que `PUT /api/cobranza/documents` deje de crear/borrar `Payment`, hay que
+resolver dos cosas más (si no, se rompen pagos NC o los saldos pendientes):
+
+1. **Pagos con Nota de Crédito**: hoy también se persisten por ese PUT (se recrean con
+   `creditNoteDocumentId`). Antes de sacar los pagos del PUT hace falta un
+   **endpoint de aplicar-NC** (`POST /api/cobranza/payments/credit-note`):
+   crea `Payment` con `sourceType='CreditNote'`, `creditNoteDocumentId`, reduce el
+   pendiente del documento objetivo Y del NC, recalcula estados. (La reversa NC ya está
+   contemplada en `/reverse` por la rama `creditNoteDocumentId`.)
+2. **Derivación de `pendingAmount`/`status`**: hoy el PUT los deriva de los
+   `document.payments` que manda el cliente. Al sacar los pagos del PUT, esa derivación
+   debe recalcularse desde los **pagos realmente persistidos en la base** (no del cliente).
+   Alternativa: que el PUT no toque `pendingAmount`/`status` (los dueñan los endpoints) y
+   solo maneje campos del documento + items/PNRs; al crear un documento nuevo,
+   `pendingAmount = totalAmount`.
+
+Orden dentro del bloque: (a) endpoint aplicar-NC (aditivo, testear por API), (b) PUT deja
+de manejar pagos y recalcula pendientes desde la base, (c) cliente a endpoints (bank + NC),
+(d) quitar sync/array compartido, (e) matriz completa.
+
 ## 4c / Fase 5 — Cliente y page.tsx
 
 - CobranzaManagement: `onAssociatePayment` y `onReversePayment` llaman a los endpoints

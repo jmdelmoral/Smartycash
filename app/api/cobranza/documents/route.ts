@@ -136,7 +136,8 @@ export async function PUT(request: Request) {
     metadata?: unknown;
   }> = [];
 
-  await prisma.$transaction(async (tx) => {
+  try {
+    await prisma.$transaction(async (tx) => {
     const existingDocuments = await tx.cobranzaDocument.findMany({
       where: { id: { in: documentIds.length > 0 ? documentIds : [''] } },
       include: { payments: true, items: true },
@@ -327,6 +328,12 @@ export async function PUT(request: Request) {
       tx
     );
   });
+  } catch (err) {
+    return NextResponse.json(
+      { error: 'Error al guardar Cobranza', detail: String((err as Error)?.message ?? err) },
+      { status: 500 }
+    );
+  }
 
   return NextResponse.json({ ok: true });
 }
