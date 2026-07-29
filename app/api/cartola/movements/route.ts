@@ -68,8 +68,13 @@ export async function GET(request: Request) {
 
   // Backward compatible: with no `pageSize` param we return the full filtered
   // set (legacy behaviour). With `pageSize` we paginate and also report `total`.
-  const [total, rows] = await prisma.$transaction([
+  const [total, unidentifiedTotal, rows] = await prisma.$transaction([
     prisma.cartolaMovement.count({ where }),
+    // D 3a: conteo de "Sin identificar" dentro del filtro, para el indicador
+    // (la vista paginada ya no puede calcularlo sobre el array completo).
+    prisma.cartolaMovement.count({
+      where: { AND: [where, { identificationType: 'SinIdentificar' }] },
+    }),
     prisma.cartolaMovement.findMany({
       where,
       include: { allocations: { include: { saleReference: true } } },
@@ -81,6 +86,7 @@ export async function GET(request: Request) {
   return NextResponse.json({
     movements: rows.map(cartolaToUi),
     total,
+    unidentifiedTotal,
     page: paginate ? page : 1,
     pageSize: paginate && pageSize ? pageSize : total,
   });

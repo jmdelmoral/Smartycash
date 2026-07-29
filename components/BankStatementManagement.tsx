@@ -1,7 +1,7 @@
 'use client';
 
 import { useSession } from 'next-auth/react';
-import { useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import * as XLSX from 'xlsx';
 import { z } from 'zod';
 
@@ -115,7 +115,7 @@ function generateId(prefix: string): string {
   const random = Math.random().toString(36).slice(2, 8).toUpperCase();
   return `${prefix}-${Date.now()}-${random}`;
 }
-const ITEMS_PER_PAGE = 20; // filas por página en la tabla de Cartola (ajústalo si quieres)
+const ITEMS_PER_PAGE = 100; // D 3a: tamaño de página server-side (máx 200 en el GET)
 
 export function BankStatementManagement({
   availableAccounts,
@@ -151,6 +151,80 @@ export function BankStatementManagement({
   // Pagination state
   const [currentPage, setCurrentPage] = useState(1);
 
+  // D 3a: datos paginados desde el servidor (no dependemos del array completo).
+  const [serverRows, setServerRows] = useState<CartolaMovement[]>([]);
+  const [serverTotal, setServerTotal] = useState(0);
+  const [serverUnidentified, setServerUnidentified] = useState(0);
+  const [serverLoading, setServerLoading] = useState(false);
+  const reloadTokenRef = useRef(0);
+
+  const loadPage = useCallback(async () => {
+    const params = new URLSearchParams();
+    params.set('pageSize', String(ITEMS_PER_PAGE));
+    params.set('page', String(currentPage));
+    if (bankFilter !== 'all') params.set('bank', bankFilter);
+    if (accountFilter !== 'all') params.set('account', accountFilter);
+    if (countryFilter !== 'all') params.set('country', countryFilter);
+    if (typeFilter !== 'all') params.set('identification', typeFilter);
+    if (dateFromFilter) params.set('dateFrom', dateFromFilter);
+    if (dateToFilter) params.set('dateTo', dateToFilter);
+    const q = searchFilter.trim();
+    if (q) params.set('search', q);
+    const token = ++reloadTokenRef.current;
+    setServerLoading(true);
+    try {
+      const res = await fetch(`/api/cartola/movements?${params.toString()}`, { cache: 'no-store' });
+      if (!res.ok) return;
+      const data = (await res.json()) as {
+        movements: CartolaMovement[];
+        total?: number;
+        unidentifiedTotal?: number;
+      };
+      if (token !== reloadTokenRef.current) return; // respuesta obsoleta, la ignoramos
+      setServerRows(data.movements ?? []);
+      setServerTotal(data.total ?? data.movements?.length ?? 0);
+      setServerUnidentified(data.unidentifiedTotal ?? 0);
+    } catch {
+      // silencioso: se puede reintentar cambiando filtros/página
+    } finally {
+      if (token === reloadTokenRef.current) setServerLoading(false);
+    }
+  }, [
+    bankFilter,
+    accountFilter,
+    countryFilter,
+    typeFilter,
+    dateFromFilter,
+    dateToFilter,
+    searchFilter,
+    currentPage,
+  ]);
+
+  // Carga (con pequeño debounce para la búsqueda) al cambiar filtros/página.
+  useEffect(() => {
+    const t = window.setTimeout(() => {
+      void loadPage();
+    }, 250);
+    return () => window.clearTimeout(t);
+  }, [loadPage]);
+
+  // D 3b: persiste 1+ movimientos POR REGISTRO reutilizando el PUT existente.
+  // knownIds = solo estos ids => la reversa (knownIds - payload) queda vacía, así
+  // que no toca ningún otro movimiento. Permite escribir sin cargar todo el array.
+  const persistMovements = useCallback(async (list: CartolaMovement[]) => {
+    if (list.length === 0) return true;
+    try {
+      const res = await fetch('/api/cartola/movements', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ movements: list, knownIds: list.map((m) => m.movementId) }),
+      });
+      return res.ok;
+    } catch {
+      return false;
+    }
+  }, []);
+
   // Modal states
   const [isMovementModalOpen, setIsMovementModalOpen] = useState(false);
   const [isDocumentModalOpen, setIsDocumentModalOpen] = useState(false);
@@ -184,19 +258,22 @@ export function BankStatementManagement({
   const [editDocumentsError, setEditDocumentsError] = useState<string | null>(null);
 
   const selectedMovement = useMemo(
-    () => movements.find((m) => m.movementId === selectedMovementId),
-    [movements, selectedMovementId]
+    () => serverRows.find((m) => m.movementId === selectedMovementId),
+    [serverRows, selectedMovementId]
   );
 
   // Filter options based on loaded data
-  const uniqueBanks = useMemo(() => Array.from(new Set(movements.map((m) => m.bank))), [movements]);
+  const uniqueBanks = useMemo(
+    () => Array.from(new Set(availableAccounts.map((a) => a.bankName))),
+    [availableAccounts]
+  );
   const uniqueAccounts = useMemo(
-    () => Array.from(new Set(movements.map((m) => m.bankAccount))),
-    [movements]
+    () => Array.from(new Set(availableAccounts.map((a) => a.accountNumber))),
+    [availableAccounts]
   );
   const uniqueCountries = useMemo(
-    () => Array.from(new Set(movements.map((m) => m.country))),
-    [movements]
+    () => Array.from(new Set(availableAccounts.map((a) => a.country))),
+    [availableAccounts]
   );
 
   const toIsoDay = (v: string): string => {
@@ -208,70 +285,17 @@ export function BankStatementManagement({
     return raw;
   };
 
-  const filteredMovements = useMemo(() => {
-    const q = searchFilter.trim().toLowerCase();
-    return movements.filter((m) => {
-      const matchBank = bankFilter === 'all' || m.bank === bankFilter;
-      const matchAccount = accountFilter === 'all' || m.bankAccount === accountFilter;
-      const matchCountry = countryFilter === 'all' || m.country === countryFilter;
-      const matchType = typeFilter === 'all' || m.mainIdentification === typeFilter;
-      const day = toIsoDay(m.date);
-      const matchFrom = !dateFromFilter || day >= dateFromFilter;
-      const matchTo = !dateToFilter || day <= dateToFilter;
-      const matchSearch =
-        !q ||
-        [
-          m.displayId,
-          m.movementId,
-          m.description,
-          m.bank,
-          m.bankAccount,
-          ...m.documents.map((d) => d.reference),
-        ]
-          .filter(Boolean)
-          .join(' ')
-          .toLowerCase()
-          .includes(q);
-      return matchBank && matchAccount && matchCountry && matchType && matchFrom && matchTo && matchSearch;
-    });
-  }, [
-    movements,
-    bankFilter,
-    accountFilter,
-    countryFilter,
-    typeFilter,
-    dateFromFilter,
-    dateToFilter,
-    searchFilter,
-  ]);
+  // D 3a: el servidor ya aplica filtros/orden/paginado; la tabla muestra la página tal cual.
+  const filteredMovements = serverRows;
 
-  const unidentifiedCount = useMemo(
-    () => filteredMovements.filter((m) => m.mainIdentification === 'Sin identificar').length,
-    [filteredMovements]
-  );
+  const unidentifiedCount = serverUnidentified;
+  const unidentifiedRate = serverTotal === 0 ? 0 : (serverUnidentified / serverTotal) * 100;
 
-  const unidentifiedRate = useMemo(
-    () =>
-      filteredMovements.length === 0 ? 0 : (unidentifiedCount / filteredMovements.length) * 100,
-    [filteredMovements.length, unidentifiedCount]
-  );
+  const prioritizedMovements = serverRows;
 
-  const prioritizedMovements = useMemo(
-    () =>
-      [...filteredMovements].sort((a, b) => {
-        const aIsUnidentified = a.mainIdentification === 'Sin identificar' ? 0 : 1;
-        const bIsUnidentified = b.mainIdentification === 'Sin identificar' ? 0 : 1;
-        return aIsUnidentified - bIsUnidentified;
-      }),
-    [filteredMovements]
-  );
-
-  // Pagination Logic
-  const totalPages = Math.ceil(prioritizedMovements.length / ITEMS_PER_PAGE);
-  const paginatedMovements = useMemo(() => {
-    const start = (currentPage - 1) * ITEMS_PER_PAGE;
-    return prioritizedMovements.slice(start, start + ITEMS_PER_PAGE);
-  }, [prioritizedMovements, currentPage]);
+  // Pagination Logic (server-side)
+  const totalPages = Math.max(1, Math.ceil(serverTotal / ITEMS_PER_PAGE));
+  const paginatedMovements = serverRows;
 
   // Reset page when filters change
   useMemo(
@@ -312,11 +336,28 @@ export function BankStatementManagement({
     document.body.removeChild(link);
   };
 
-  const onExportDocumentDetails = () => {
-    // Usa la MISMA lista filtrada que la tabla. Los movimientos CON PNR salen una
-    // fila por PNR; los SIN PNR (no identificados) salen igual con una fila
-    // (Referencia vacía y su monto), para que el export quede completo.
-    const data = prioritizedMovements.flatMap((m) =>
+  // D 3a: para exportar TODO lo filtrado (no solo la página visible), pedimos al
+  // servidor el conjunto completo (GET sin pageSize devuelve todo el filtro).
+  const fetchAllForExport = useCallback(async (): Promise<CartolaMovement[]> => {
+    const params = new URLSearchParams();
+    if (bankFilter !== 'all') params.set('bank', bankFilter);
+    if (accountFilter !== 'all') params.set('account', accountFilter);
+    if (countryFilter !== 'all') params.set('country', countryFilter);
+    if (typeFilter !== 'all') params.set('identification', typeFilter);
+    if (dateFromFilter) params.set('dateFrom', dateFromFilter);
+    if (dateToFilter) params.set('dateTo', dateToFilter);
+    const q = searchFilter.trim();
+    if (q) params.set('search', q);
+    const res = await fetch(`/api/cartola/movements?${params.toString()}`, { cache: 'no-store' });
+    if (!res.ok) return [];
+    const data = (await res.json()) as { movements?: CartolaMovement[] };
+    return data.movements ?? [];
+  }, [bankFilter, accountFilter, countryFilter, typeFilter, dateFromFilter, dateToFilter, searchFilter]);
+
+  const onExportDocumentDetails = async () => {
+    // Exporta TODO el conjunto filtrado (no solo la página visible).
+    const rows = await fetchAllForExport();
+    const data = rows.flatMap((m) =>
       m.documents.length > 0
         ? m.documents.map((d) => ({
             MovimientoID: m.displayId || m.movementId,
@@ -345,8 +386,9 @@ export function BankStatementManagement({
     XLSX.writeFile(wb, 'detalle_documentos_smarty.xlsx');
   };
 
-  const onExportMovements = () => {
-    const data = prioritizedMovements.map((m) => ({
+  const onExportMovements = async () => {
+    const rows = await fetchAllForExport();
+    const data = rows.map((m) => ({
       ID: m.displayId || m.movementId,
       Banco: m.bank,
       Cuenta: m.bankAccount,
@@ -505,6 +547,9 @@ export function BankStatementManagement({
         setUploadOkMessage(
           `Carga exitosa. Se actualizaron ${Object.keys(groupedByMov).length} movimientos.`
         );
+        // D 3b: los detalles se guardan vía el sync del array compartido; refrescamos
+        // la vista server-side tras un instante para reflejar los cambios.
+        window.setTimeout(() => void loadPage(), 1300);
       }
 
       setPendingUploadFileName(file.name);
@@ -520,12 +565,18 @@ export function BankStatementManagement({
     }
   };
 
-  const onConfirmMassUpload = () => {
+  const onConfirmMassUpload = async () => {
     if (pendingUploadMovements.length === 0) return;
-    setMovements((prev) => [...pendingUploadMovements, ...prev]);
+    const ok = await persistMovements(pendingUploadMovements);
+    if (!ok) {
+      setUploadError('No fue posible guardar la carga en el servidor.');
+      return;
+    }
     setUploadOkMessage(`Carga exitosa: ${pendingUploadMovements.length} movimientos creados.`);
     setPendingUploadMovements([]);
     setPendingUploadFileName(null);
+    setCurrentPage(1);
+    void loadPage();
   };
 
   const openEditMov = (m: CartolaMovement) => {
@@ -542,7 +593,7 @@ export function BankStatementManagement({
     setEditMovDesc(m.description);
   };
 
-  const onSaveMovEdit = () => {
+  const onSaveMovEdit = async () => {
     if (!editMov) return;
     setEditMovError(null);
     const amount = Number(editMovAmount);
@@ -558,18 +609,23 @@ export function BankStatementManagement({
       setEditMovError('La descripción es obligatoria.');
       return;
     }
-    setMovements((prev) =>
-      prev.map((m) =>
-        m.movementId === editMov.movementId
-          ? { ...m, amount, date: editMovDate, description: editMovDesc.trim() }
-          : m
-      )
-    );
+    const updated: CartolaMovement = {
+      ...editMov,
+      amount,
+      date: editMovDate,
+      description: editMovDesc.trim(),
+    };
+    const ok = await persistMovements([updated]);
+    if (!ok) {
+      setEditMovError('No fue posible guardar el cambio en el servidor.');
+      return;
+    }
     setEditMov(null);
+    void loadPage();
   };
 
-  const onDeleteMovement = (movementId: string) => {
-    const target = movements.find((m) => m.movementId === movementId);
+  const onDeleteMovement = async (movementId: string) => {
+    const target = serverRows.find((m) => m.movementId === movementId);
     // Gate de cierre contable: un movimiento CerradoDefinitivo solo lo puede
     // anular/reversar Contabilidad o Administrador.
     const role = session?.user?.role;
@@ -593,20 +649,29 @@ export function BankStatementManagement({
       }
     }
 
-    setMovements((prev) => prev.filter((m) => m.movementId !== movementId));
     if (selectedMovementId === movementId) {
       setSelectedMovementId(null);
     }
-    // Reversa explícita en el servidor (reemplaza la antigua reversión por omisión).
-    void fetch('/api/cartola/movements', {
-      method: 'DELETE',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ movementIds: [movementId] }),
-    }).catch(() => setUploadError('No fue posible reversar el movimiento en el servidor.'));
+    // D 3b: reversa explícita en el servidor y refresco de la página actual.
+    try {
+      const res = await fetch('/api/cartola/movements', {
+        method: 'DELETE',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ movementIds: [movementId] }),
+      });
+      if (!res.ok) {
+        setUploadError('No fue posible reversar el movimiento en el servidor.');
+        return;
+      }
+    } catch {
+      setUploadError('No fue posible reversar el movimiento en el servidor.');
+      return;
+    }
+    void loadPage();
   };
 
   const onOpenDocumentEditor = (movementId: string) => {
-    const target = movements.find((m) => m.movementId === movementId);
+    const target = serverRows.find((m) => m.movementId === movementId);
     if (!target) return;
     setEditingMovementId(movementId);
     setEditDocuments([...target.documents]);
@@ -643,28 +708,28 @@ export function BankStatementManagement({
     setEditDocumentAmount('');
   };
 
-  const onSaveEditedDocuments = () => {
+  const onSaveEditedDocuments = async () => {
     setEditDocumentsError(null);
     if (!editingMovementId) return;
-    const target = movements.find((m) => m.movementId === editingMovementId);
+    const target = serverRows.find((m) => m.movementId === editingMovementId);
     if (!target) return;
 
     if (editType === 'Sin identificar') {
       // Lógica de reversión: Al volver a "Sin identificar", borramos los documentos
-      setMovements((prev) =>
-        prev.map((m) =>
-          m.movementId === editingMovementId
-            ? {
-                ...m,
-                documents: [],
-                mainIdentification: 'Sin identificar',
-                mainIdentificationId: mainIdentificationMap['Sin identificar'],
-              }
-            : m
-        )
-      );
+      const cleared: CartolaMovement = {
+        ...target,
+        documents: [],
+        mainIdentification: 'Sin identificar',
+        mainIdentificationId: mainIdentificationMap['Sin identificar'],
+      };
+      const okClear = await persistMovements([cleared]);
+      if (!okClear) {
+        setEditDocumentsError('No fue posible guardar en el servidor.');
+        return;
+      }
       setIsDocumentModalOpen(false);
       setEditingMovementId(null);
+      void loadPage();
       return;
     }
 
@@ -679,23 +744,23 @@ export function BankStatementManagement({
       return;
     }
 
-    setMovements((prev) =>
-      prev.map((m) =>
-        m.movementId === editingMovementId
-          ? {
-              ...m,
-              documents: editDocuments,
-              mainIdentification: editType,
-              mainIdentificationId: mainIdentificationMap[editType],
-            }
-          : m
-      )
-    );
+    const reconciled: CartolaMovement = {
+      ...target,
+      documents: editDocuments,
+      mainIdentification: editType,
+      mainIdentificationId: mainIdentificationMap[editType],
+    };
+    const okRec = await persistMovements([reconciled]);
+    if (!okRec) {
+      setEditDocumentsError('No fue posible guardar en el servidor.');
+      return;
+    }
     setIsDocumentModalOpen(false);
     setEditingMovementId(null);
+    void loadPage();
   };
 
-  const onCreateManualMovement = () => {
+  const onCreateManualMovement = async () => {
     setManualError(null);
     const amount = Number(manualAmount);
     if (!Number.isFinite(amount) || amount <= 0) {
@@ -734,10 +799,16 @@ export function BankStatementManagement({
       documents: manualDocuments,
     };
 
-    setMovements((prev) => [movement, ...prev]);
+    const ok = await persistMovements([movement]);
+    if (!ok) {
+      setManualError('No fue posible guardar el movimiento en el servidor.');
+      return;
+    }
     setIsMovementModalOpen(false);
     setManualAmount('');
     setManualDocuments([]);
+    setCurrentPage(1);
+    void loadPage();
   };
 
   return (
@@ -915,7 +986,7 @@ export function BankStatementManagement({
           className={`mb-3 rounded-md border p-3 text-sm ${unidentifiedRate > 20 ? 'border-red-200 bg-red-50 text-red-700' : unidentifiedRate > 10 ? 'border-amber-200 bg-amber-50 text-amber-700' : 'border-emerald-200 bg-emerald-50 text-emerald-700'}`}
         >
           Movimientos sin identificar: <span className="font-semibold">{unidentifiedCount}</span> de{' '}
-          <span className="font-semibold">{filteredMovements.length}</span> (
+          <span className="font-semibold">{serverTotal}</span> (
           <span className="font-semibold">{unidentifiedRate.toFixed(1)}%</span>).
         </section>
         <div className="max-h-[700px] overflow-auto rounded-lg border">
@@ -932,7 +1003,7 @@ export function BankStatementManagement({
               </tr>
             </thead>
             <tbody>
-              {loading ? (
+              {loading || serverLoading ? (
                 <tr>
                   <td colSpan={7} className="px-3 py-12 text-center text-slate-500">
                     <span className="inline-flex items-center gap-2">
