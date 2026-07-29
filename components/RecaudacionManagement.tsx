@@ -766,7 +766,7 @@ export function RecaudacionManagement({
         Fecha_Transferencia: formatDate(r.transferDate),
         Monto_Total: r.amount,
         Codigo_Autorizacion: r.authorizationCode || '',
-        Movimiento_Cartola: mov?.displayId || r.associatedMovementId || '',
+        Movimiento_Cartola: r.associatedMovementDisplayId || mov?.displayId || r.associatedMovementId || '',
         Cant_PNRs: r.documents.length,
         PNRs: r.documents.map((d) => d.reference).join(', '),
         Comprobantes: r.attachments?.length ?? 0,
@@ -1072,9 +1072,18 @@ export function RecaudacionManagement({
                   .map((r) => {
                   const associatedAccount = bankAccounts.find((acc) => acc.id === r.bankAccountId);
                   const associatedClient = clients.find((c) => c.id === r.clientId);
-                  const associatedMovement = r.associatedMovementId
+                  // D 2c: preferimos el vinculo denormalizado del servidor; el
+                  // fallback a `movements` cubre el caso recien validado en cliente.
+                  const linkedMov = r.associatedMovementId
                     ? movements.find((m) => m.movementId === r.associatedMovementId)
-                    : null;
+                    : undefined;
+                  const hasMovLink = Boolean(r.associatedMovementId);
+                  const movLinkBank = r.associatedMovementBank || linkedMov?.bank || '';
+                  const movLinkDisplay =
+                    r.associatedMovementDisplayId ||
+                    linkedMov?.displayId ||
+                    r.associatedMovementId ||
+                    '';
 
                   return (
                     <tr
@@ -1092,10 +1101,9 @@ export function RecaudacionManagement({
                           Transferencia: {formatDate(r.transferDate)} |{' '}
                           <b>${r.amount.toLocaleString()}</b>
                         </div>
-                        {associatedMovement && (
+                        {hasMovLink && (
                           <div className="text-[10px] text-emerald-600 mt-1 bg-emerald-50 p-1 rounded border border-emerald-100">
-                            Vínculo Cartola: {associatedMovement.bank} (
-                            {associatedMovement.displayId || associatedMovement.movementId})
+                            Vínculo Cartola: {movLinkBank} ({movLinkDisplay})
                           </div>
                         )}
                       </td>

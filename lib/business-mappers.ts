@@ -28,6 +28,8 @@ type CollectionWithItems = PrismaCollectionRequest & {
   supportFile: { fileName: string } | null;
   items: CollectionRequestItem[];
   attachments?: { id: string; fileName: string; mimeType: string | null }[];
+  // D 2c: movimiento de cartola asociado (denormalizado para la UI).
+  associatedMovement?: { displayId: string | null; bank: string } | null;
 };
 
 type CobranzaWithItemsAndPayments = PrismaCobranzaDocument & {
@@ -123,6 +125,8 @@ export function collectionToUi(request: CollectionWithItems): CollectionRequest 
     status: request.status as CollectionStatus,
     rejectionComment: request.rejectionComment ?? undefined,
     associatedMovementId: request.associatedMovementId ?? undefined,
+    associatedMovementDisplayId: request.associatedMovement?.displayId ?? undefined,
+    associatedMovementBank: request.associatedMovement?.bank ?? undefined,
     infoRequestComment: request.infoRequestComment ?? undefined,
     infoRequestedAt: request.infoRequestedAt ? request.infoRequestedAt.toISOString() : undefined,
     // Marcas de tiempo por etapa (informe de tiempos del Agente CC).

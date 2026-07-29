@@ -64,7 +64,14 @@ export async function GET() {
   // Devolvemos TODAS (incluidas anuladas). El filtro de Estado del cliente decide
   // si se muestran o no; por defecto la vista las oculta.
   const requests = await prisma.collectionRequest.findMany({
-    include: { supportFile: true, items: true, attachments: true },
+    include: {
+      supportFile: true,
+      items: true,
+      attachments: true,
+      // D 2c: traemos displayId+bank del movimiento asociado para mostrar el
+      // vinculo sin depender de la lista completa de movimientos en el cliente.
+      associatedMovement: { select: { displayId: true, bank: true } },
+    },
     orderBy: [{ createdAt: 'desc' }],
   });
 

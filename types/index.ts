@@ -86,6 +86,8 @@ export type CollectionRequest = {
   status: CollectionStatus;
   rejectionComment?: string;
   associatedMovementId?: string;
+  associatedMovementDisplayId?: string; // D 2c: vinculo Cartola denormalizado
+  associatedMovementBank?: string; // D 2c
   documents: CartolaDocument[]; // Detalle de PNRs
 };
 
