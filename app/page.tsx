@@ -45,12 +45,12 @@ type ApplicationTab =
 
 const ROLE_ACCESS: Record<ApplicationTab, UserRole[]> = {
   usuarios: ['Administrador'],
-  cuentas: ['Administrador'],
+  cuentas: ['Administrador', 'Recaudacion', 'Cobranza'],
   clientes: ['Administrador', 'AgenteCC', 'Recaudacion'],
   cartola: ['Contabilidad', 'Recaudacion', 'ConciliacionMediosDePago', 'Cobranza'],
-  recaudacion: ['Recaudacion', 'Contabilidad'],
+  recaudacion: ['Recaudacion', 'Contabilidad', 'AgenteCC', 'Cobranza'],
   contabilidad: ['Contabilidad'],
-  'cobranza-credito': ['Cobranza', 'AgenteCC'],
+  'cobranza-credito': ['Cobranza'],
 };
 
 const tabLabel: Record<ApplicationTab, string> = {
