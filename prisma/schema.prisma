@@ -102,6 +102,7 @@ model Client {
   taxId         String   @unique
   navitaireCode String?  @unique
   sapBP         String?  @unique
+  country       String   @default("Chile") // país del cliente; define el país de sus documentos
   isActive      Boolean  @default(true)
   createdAt     DateTime @default(now())
   updatedAt     DateTime @updatedAt
@@ -310,7 +311,8 @@ model FileBlob {
 model CobranzaDocument {
   id             String                 @id @default(cuid())
   documentNumber String
-  type           CobranzaDocumentType
+  type           CobranzaDocumentType // categoría (derivada del typeCode)
+  typeCode       String               @default("") // código fiscal/interno (33, 34, 61, ...)
   date           DateTime
   country        String
   currency       String                 @default("CLP")
@@ -331,7 +333,7 @@ model CobranzaDocument {
   creditNotePayments Payment[]                   @relation("CreditNotePayments")
   allocations        CartolaMovementAllocation[]
 
-  @@unique([documentNumber, type])
+  @@unique([documentNumber, typeCode, country])
   @@index([clientId])
   @@index([status])
 }

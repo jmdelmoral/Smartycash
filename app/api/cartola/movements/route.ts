@@ -439,6 +439,23 @@ export async function DELETE(request: Request) {
     return NextResponse.json({ error: 'Datos invalidos' }, { status: 400 });
   }
 
+  // Gate de cierre contable: un movimiento CerradoDefinitivo solo puede
+  // reversarse/anularse por Contabilidad o Administrador.
+  if (!canRead(session, 'Contabilidad')) {
+    const closed = await prisma.cartolaMovement.findFirst({
+      where: { id: { in: parsed.data.movementIds }, closeState: 'CerradoDefinitivo' },
+      select: { displayId: true, id: true },
+    });
+    if (closed) {
+      return NextResponse.json(
+        {
+          error: `El movimiento ${closed.displayId ?? closed.id} está CERRADO contablemente. Solo Contabilidad puede reversarlo.`,
+        },
+        { status: 403 }
+      );
+    }
+  }
+
   await prisma.$transaction(async (tx) => {
     const toReverse = await tx.cartolaMovement.findMany({
       where: { id: { in: parsed.data.movementIds }, status: { not: 'Reversed' } },

@@ -138,6 +138,13 @@ export function BankStatementManagement({
   const [countryFilter, setCountryFilter] = useState<string>('all');
   const [typeFilter, setTypeFilter] = useState<string>('all');
 
+  // Edición de valores de movimiento (solo "Sin identificar").
+  const [editMov, setEditMov] = useState<CartolaMovement | null>(null);
+  const [editMovAmount, setEditMovAmount] = useState('');
+  const [editMovDate, setEditMovDate] = useState('');
+  const [editMovDesc, setEditMovDesc] = useState('');
+  const [editMovError, setEditMovError] = useState<string | null>(null);
+
   // Pagination state
   const [currentPage, setCurrentPage] = useState(1);
 
@@ -479,11 +486,69 @@ export function BankStatementManagement({
     setPendingUploadFileName(null);
   };
 
+  const openEditMov = (m: CartolaMovement) => {
+    const role = session?.user?.role;
+    const canTouchClosed = role === 'Administrador' || role === 'Contabilidad';
+    if (m.closeState === 'CerradoDefinitivo' && !canTouchClosed) {
+      setUploadError('Movimiento CERRADO contablemente. Solo Contabilidad puede editarlo.');
+      return;
+    }
+    setEditMovError(null);
+    setEditMov(m);
+    setEditMovAmount(String(m.amount));
+    setEditMovDate(m.date);
+    setEditMovDesc(m.description);
+  };
+
+  const onSaveMovEdit = () => {
+    if (!editMov) return;
+    setEditMovError(null);
+    const amount = Number(editMovAmount);
+    if (!Number.isFinite(amount) || amount <= 0) {
+      setEditMovError('El monto debe ser un número positivo.');
+      return;
+    }
+    if (!editMovDate) {
+      setEditMovError('Indica la fecha.');
+      return;
+    }
+    if (!editMovDesc.trim()) {
+      setEditMovError('La descripción es obligatoria.');
+      return;
+    }
+    setMovements((prev) =>
+      prev.map((m) =>
+        m.movementId === editMov.movementId
+          ? { ...m, amount, date: editMovDate, description: editMovDesc.trim() }
+          : m
+      )
+    );
+    setEditMov(null);
+  };
+
   const onDeleteMovement = (movementId: string) => {
     const target = movements.find((m) => m.movementId === movementId);
-    if (target && target.mainIdentification !== 'Sin identificar') {
-      setUploadError('No se puede eliminar un movimiento ya identificado/conciliado.');
+    // Gate de cierre contable: un movimiento CerradoDefinitivo solo lo puede
+    // anular/reversar Contabilidad o Administrador.
+    const role = session?.user?.role;
+    const canTouchClosed = role === 'Administrador' || role === 'Contabilidad';
+    if (target?.closeState === 'CerradoDefinitivo' && !canTouchClosed) {
+      setUploadError(
+        'Movimiento CERRADO contablemente. Solo Contabilidad puede reversarlo/reabrirlo.'
+      );
       return;
+    }
+    // Antes se bloqueaba anular un movimiento identificado. Ahora se permite (con
+    // confirmación): al anularlo se libera/reversa. Si estaba ligado a una
+    // solicitud/documento, revisa ese caso aparte.
+    if (target && target.mainIdentification !== 'Sin identificar') {
+      if (
+        !window.confirm(
+          `Este movimiento está identificado como "${target.mainIdentification}". ¿Anularlo/reversarlo de todos modos? Se quitará de la cartola.`
+        )
+      ) {
+        return;
+      }
     }
 
     setMovements((prev) => prev.filter((m) => m.movementId !== movementId));
@@ -847,13 +912,17 @@ export function BankStatementManagement({
                       >
                         Docs
                       </Button>
+                      {m.mainIdentification === 'Sin identificar' && (
+                        <Button variant="outline" size="sm" onClick={() => openEditMov(m)}>
+                          Editar
+                        </Button>
+                      )}
                       <Button
                         variant="destructive"
                         size="sm"
                         onClick={() => onDeleteMovement(m.movementId)}
-                        disabled={m.mainIdentification !== 'Sin identificar'}
                       >
-                        Borrar
+                        {m.mainIdentification === 'Sin identificar' ? 'Borrar' : 'Anular'}
                       </Button>
                     </div>
                   </td>
@@ -922,6 +991,47 @@ export function BankStatementManagement({
       </div>
 
       {/* Modals integrados en el componente */}
+      {editMov && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
+          <Card className="w-full max-w-md p-6">
+            <h3 className="mb-1 text-lg font-semibold">
+              Editar movimiento {editMov.displayId || editMov.movementId}
+            </h3>
+            <p className="mb-4 text-xs text-slate-500">
+              Solo movimientos sin identificar. Ajusta monto, fecha y descripción.
+            </p>
+            <div className="space-y-3">
+              <div className="space-y-1">
+                <label className="text-xs font-medium">Monto</label>
+                <Input
+                  type="number"
+                  value={editMovAmount}
+                  onChange={(e) => setEditMovAmount(e.target.value)}
+                />
+              </div>
+              <div className="space-y-1">
+                <label className="text-xs font-medium">Fecha</label>
+                <Input
+                  type="date"
+                  value={editMovDate}
+                  onChange={(e) => setEditMovDate(e.target.value)}
+                />
+              </div>
+              <div className="space-y-1">
+                <label className="text-xs font-medium">Descripción</label>
+                <Input value={editMovDesc} onChange={(e) => setEditMovDesc(e.target.value)} />
+              </div>
+              {editMovError && <p className="text-xs text-red-600">{editMovError}</p>}
+            </div>
+            <div className="mt-4 flex justify-end gap-2">
+              <Button variant="outline" onClick={() => setEditMov(null)}>
+                Cancelar
+              </Button>
+              <Button onClick={onSaveMovEdit}>Guardar</Button>
+            </div>
+          </Card>
+        </div>
+      )}
       {isMovementModalOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
           <Card className="max-h-[90vh] w-full max-w-2xl overflow-y-auto p-6">

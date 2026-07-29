@@ -107,6 +107,7 @@ export function cartolaToUi(movement: CartolaWithAllocations): CartolaMovement {
     mainIdentification: prismaIdentificationToUi(movement.identificationType),
     mainIdentificationId: movement.allocations[0]?.sourceEntityId ?? '',
     documents,
+    closeState: movement.closeState as CartolaMovement['closeState'],
   };
 }
 
@@ -160,7 +161,9 @@ export function prismaCobranzaTypeToUi(value: string): CobranzaDocumentType {
 export function cobranzaToUi(document: CobranzaWithItemsAndPayments): CobranzaMainDocument {
   return {
     id: document.id,
+    documentNumber: document.documentNumber,
     type: prismaCobranzaTypeToUi(document.type),
+    typeCode: document.typeCode || (document.type as string),
     date: toDateInput(document.date),
     country: document.country,
     clientId: document.clientId,

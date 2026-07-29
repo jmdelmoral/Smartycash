@@ -23,15 +23,28 @@ export function ClientManagement({
   const [taxId, setTaxId] = useState('');
   const [navitaireCode, setNavitaireCode] = useState('');
   const [sapBP, setSapBP] = useState('');
+  const [country, setCountry] = useState('Chile');
   const [editingClient, setEditingClient] = useState<Client | null>(null);
+  const COUNTRY_OPTIONS = [
+    'Chile',
+    'Perú',
+    'Colombia',
+    'Argentina',
+    'Brasil',
+    'México',
+    'Estados Unidos',
+    'España',
+    'China',
+  ];
 
   const handleAdd = () => {
     if (!name || !taxId) return;
-    onAddClient({ id: '', name, taxId, navitaireCode, sapBP, isActive: true });
+    onAddClient({ id: '', name, taxId, navitaireCode, sapBP, country, isActive: true });
     setName('');
     setTaxId('');
     setNavitaireCode('');
     setSapBP('');
+    setCountry('Chile');
   };
 
   const startEdit = (client: Client) => {
@@ -39,6 +52,7 @@ export function ClientManagement({
       ...client,
       navitaireCode: client.navitaireCode ?? '',
       sapBP: client.sapBP ?? '',
+      country: client.country ?? 'Chile',
     });
   };
 
@@ -81,6 +95,20 @@ export function ClientManagement({
             <label className="text-sm font-medium">BP SAP</label>
             <Input value={sapBP} onChange={(e) => setSapBP(e.target.value)} placeholder="1000456" />
           </div>
+          <div className="space-y-2">
+            <label className="text-sm font-medium">País</label>
+            <select
+              className="h-10 w-full rounded-md border bg-white px-2 text-sm"
+              value={country}
+              onChange={(e) => setCountry(e.target.value)}
+            >
+              {COUNTRY_OPTIONS.map((c) => (
+                <option key={c} value={c}>
+                  {c}
+                </option>
+              ))}
+            </select>
+          </div>
           <Button onClick={handleAdd}>Registrar Cliente</Button>
         </div>
       </div>
@@ -94,6 +122,7 @@ export function ClientManagement({
               <th className="px-4 py-3">RUT / Tax ID</th>
               <th className="px-4 py-3">Navitaire</th>
               <th className="px-4 py-3">SAP BP</th>
+              <th className="px-4 py-3">País</th>
               <th className="px-4 py-3">Estado</th>
               <th className="px-4 py-3 text-right">Accion</th>
             </tr>
@@ -106,6 +135,7 @@ export function ClientManagement({
                 <td className="px-4 py-3">{client.taxId}</td>
                 <td className="px-4 py-3 font-mono text-xs">{client.navitaireCode || '-'}</td>
                 <td className="px-4 py-3 font-mono text-xs">{client.sapBP || '-'}</td>
+                <td className="px-4 py-3">{client.country || '-'}</td>
                 <td className="px-4 py-3">{client.isActive === false ? 'Inactivo' : 'Activo'}</td>
                 <td className="px-4 py-3 text-right space-x-2">
                   <Button variant="outline" size="sm" onClick={() => startEdit(client)}>
@@ -164,6 +194,20 @@ export function ClientManagement({
                 value={editingClient.sapBP ?? ''}
                 onChange={(e) => setEditingClient({ ...editingClient, sapBP: e.target.value })}
               />
+            </div>
+            <div className="space-y-2">
+              <label className="text-sm font-medium">País</label>
+              <select
+                className="h-10 w-full rounded-md border bg-white px-2 text-sm"
+                value={editingClient.country ?? 'Chile'}
+                onChange={(e) => setEditingClient({ ...editingClient, country: e.target.value })}
+              >
+                {COUNTRY_OPTIONS.map((c) => (
+                  <option key={c} value={c}>
+                    {c}
+                  </option>
+                ))}
+              </select>
             </div>
           </div>
           <div className="mt-4 flex justify-end gap-2">

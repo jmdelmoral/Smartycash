@@ -46,6 +46,7 @@ export type Client = {
   taxId: string; // RUT/DNI
   navitaireCode?: string | null;
   sapBP?: string | null;
+  country?: string; // país del cliente (define el país de sus documentos)
   isActive?: boolean;
 };
 
@@ -116,14 +117,18 @@ export type CartolaMovement = {
   mainIdentification: MainIdentificationType;
   mainIdentificationId: string;
   documents: CartolaDocument[];
+  // Estado de cierre contable (para el gate de reversas/anulaciones/ediciones).
+  closeState?: 'Abierto' | 'CerradoParcial' | 'CerradoDefinitivo';
 };
 
 export type CobranzaDocumentType = 'Factura' | 'Nota de cobro' | 'Nota de Crédito';
 export type CobranzaStatus = 'Pendiente' | 'Pagado' | 'Parcial';
 
 export type CobranzaMainDocument = {
-  id: string; // ID del documento (Factura/Nota)
-  type: CobranzaDocumentType;
+  id: string; // Identidad interna compuesta: `${country}::${typeCode}::${documentNumber}`
+  documentNumber: string; // Número visible del documento (Factura/Nota)
+  type: CobranzaDocumentType; // categoría (derivada del código)
+  typeCode: string; // código fiscal/interno (33, 34, 61, ...)
   date: string; // Fecha emisión
   country: string;
   clientId: string;

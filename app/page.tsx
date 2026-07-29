@@ -543,6 +543,35 @@ export default function HomePage() {
     );
   }
 
+  const realRole = effectiveSession?.user?.role as UserRole | undefined;
+  const appEnv = (process.env.NEXT_PUBLIC_APP_ENV ?? 'test').toLowerCase();
+  const isProdEnv = appEnv === 'prod' || appEnv === 'production' || appEnv === 'produccion';
+  const viewRoleOptions: UserRole[] = [
+    'Administrador',
+    'Contabilidad',
+    'Recaudacion',
+    'ConciliacionMediosDePago',
+    'AgenteCC',
+    'Cobranza',
+  ];
+  const tabOrderForRole: ApplicationTab[] = [
+    'cartola',
+    'recaudacion',
+    'cobranza-credito',
+    'contabilidad',
+    'clientes',
+    'cuentas',
+    'usuarios',
+  ];
+  // Solo el Administrador puede "ver como" otro rol (previsualización de vistas;
+  // el servidor sigue validando permisos por el rol real de sesión).
+  const onChangeViewRole = (role: UserRole) => {
+    setActiveRole(role);
+    const first =
+      tabOrderForRole.find((t) => role === 'Administrador' || ROLE_ACCESS[t].includes(role)) ?? null;
+    setActiveTab(first);
+  };
+
   const mustChangePassword = Boolean(effectiveSession.user?.mustChangePassword);
 
   return (
@@ -550,13 +579,38 @@ export default function HomePage() {
       <div className="mx-auto flex w-full max-w-7xl flex-col gap-6">
         <Card className="p-6">
           <div className="flex flex-wrap items-center justify-between gap-4">
-            <div>
-              <h1 className="text-3xl font-bold">SmartyCash</h1>
-              <p className="text-sm text-slate-600">
-                Gestión de cobranza y recaudación con control por roles y seguimiento de cartola.
-              </p>
+            <div className="flex items-center gap-3">
+              <div>
+                <h1 className="text-3xl font-bold">SmartyCash</h1>
+                <p className="text-sm text-slate-600">
+                  Gestión de cobranza y recaudación con control por roles y seguimiento de cartola.
+                </p>
+              </div>
+              <span
+                className={`rounded-full px-2.5 py-1 text-[11px] font-bold ${isProdEnv ? 'bg-red-100 text-red-700 border border-red-300' : 'bg-amber-100 text-amber-800 border border-amber-300'}`}
+                title="Entorno de la base de datos configurada"
+              >
+                {isProdEnv ? 'PRODUCCIÓN' : 'PRUEBA'}
+              </span>
             </div>
             <div className="flex items-center gap-3">
+              {realRole === 'Administrador' && (
+                <div className="flex flex-col">
+                  <label className="text-[10px] font-medium text-slate-400">Ver como</label>
+                  <select
+                    className="h-9 rounded-md border bg-white px-2 text-sm"
+                    value={activeRole}
+                    onChange={(e) => onChangeViewRole(e.target.value as UserRole)}
+                    title="Previsualiza la app como otro rol (solo vista)"
+                  >
+                    {viewRoleOptions.map((r) => (
+                      <option key={r} value={r}>
+                        {r}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              )}
               <div className="rounded-md border bg-white px-3 py-2 text-sm">
                 <span className="font-medium">Perfil activo:</span> {effectiveSession.user?.name} (
                 {activeRole})

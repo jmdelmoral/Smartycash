@@ -24,7 +24,9 @@ const paymentSchema = z.object({
 
 const documentSchema = z.object({
   id: z.string().min(1),
+  documentNumber: z.string().trim().min(1),
   type: z.enum(['Factura', 'Nota de cobro', 'Nota de Crédito']),
+  typeCode: z.string().trim().optional().default(''),
   date: z.string().min(1),
   country: z.string().min(1),
   clientId: z.string().min(1),
@@ -172,7 +174,8 @@ export async function PUT(request: Request) {
       await tx.cobranzaDocument.upsert({
         where: { id: document.id },
         update: {
-          documentNumber: document.id,
+          documentNumber: document.documentNumber,
+          typeCode: document.typeCode || document.type,
           type: cobranzaTypeToPrisma(document.type),
           date: parseDateInput(document.date),
           country: document.country,
@@ -183,7 +186,8 @@ export async function PUT(request: Request) {
         },
         create: {
           id: document.id,
-          documentNumber: document.id,
+          documentNumber: document.documentNumber,
+          typeCode: document.typeCode || document.type,
           type: cobranzaTypeToPrisma(document.type),
           date: parseDateInput(document.date),
           country: document.country,

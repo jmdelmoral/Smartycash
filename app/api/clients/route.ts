@@ -12,6 +12,7 @@ const clientSchema = z.object({
   taxId: z.string().trim().min(1),
   navitaireCode: z.string().trim().optional(),
   sapBP: z.string().trim().optional(),
+  country: z.string().trim().min(1).optional(),
 });
 
 const updateClientSchema = clientSchema.partial().extend({
@@ -81,6 +82,7 @@ export async function POST(request: Request) {
           taxId: parsed.data.taxId,
           navitaireCode: normalizeOptional(parsed.data.navitaireCode),
           sapBP: normalizeOptional(parsed.data.sapBP),
+          country: parsed.data.country?.trim() || 'Chile',
           createdById: session?.user?.id,
         },
       });
@@ -134,6 +136,7 @@ export async function PATCH(request: Request) {
           ? { navitaireCode: normalizeOptional(parsed.data.navitaireCode) }
           : {}),
         ...(parsed.data.sapBP !== undefined ? { sapBP: normalizeOptional(parsed.data.sapBP) } : {}),
+        ...(parsed.data.country !== undefined ? { country: parsed.data.country.trim() || 'Chile' } : {}),
         ...(parsed.data.isActive !== undefined ? { isActive: parsed.data.isActive } : {}),
       },
     });
