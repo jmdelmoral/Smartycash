@@ -88,13 +88,29 @@ export function RecaudacionManagement({
   // Busca un movimiento de cartola "Sin identificar" que calce con la solicitud
   // (cuenta + monto + fecha + banco). Se usa para preaprobar automáticamente al
   // adjuntar el comprobante a un caso que venía Pendiente (p. ej. de carga masiva).
-  const findMatchingMovement = (req: CollectionRequest) => {
+  const findMatchingMovement = async (req: {
+    bankAccountId: string;
+    amount: number;
+    transferDate: string;
+  }): Promise<CartolaMovement | undefined> => {
     const account = bankAccounts.find((a) => a.id === req.bankAccountId);
     if (!account) return undefined;
+    let candidates: CartolaMovement[] = [];
+    try {
+      const res = await fetch(
+        `/api/cartola/movements/candidates?amount=${encodeURIComponent(req.amount)}`,
+        { cache: 'no-store' }
+      );
+      if (!res.ok) return undefined;
+      const body = (await res.json()) as { candidates?: CartolaMovement[] };
+      candidates = body.candidates ?? [];
+    } catch {
+      return undefined;
+    }
     const [y, mo, d] = req.transferDate.split('-');
     const reversed = `${d}-${mo}-${y}`;
     const slashed = `${d}/${mo}/${y}`;
-    return movements.find(
+    return candidates.find(
       (mv) =>
         mv.bankAccount.toString().replace(/\D/g, '') === account.accountNumber.replace(/\D/g, '') &&
         Math.round(mv.amount) === Math.round(req.amount) &&
@@ -285,21 +301,12 @@ export function RecaudacionManagement({
         });
         // --- Fin Validaciones ---
 
-        const [year, month, day] = isoDate.split('-');
-        const reversedDate = `${day}-${month}-${year}`;
-        const slashDate = `${day}/${month}/${year}`;
-
-        const matchingMov = movements.find(
-          (m) =>
-            m.bankAccount.toString().replace(/\D/g, '') ===
-              String(first.Cuenta).replace(/\D/g, '') &&
-            Math.round(m.amount) === Math.round(totalAmount) &&
-            m.mainIdentification === 'Sin identificar' &&
-            (m.date.includes(isoDate) ||
-              m.date.includes(reversedDate) ||
-              m.date.includes(slashDate)) &&
-            m.bank.toLowerCase().includes(account.bankName.toLowerCase())
-        );
+        // D 2d: match contra el servidor (no contra la lista completa en cliente).
+        const matchingMov = await findMatchingMovement({
+          bankAccountId: account.id,
+          amount: totalAmount,
+          transferDate: isoDate,
+        });
 
         newRequests.push({
           id: generateRequestId(),
@@ -372,26 +379,13 @@ export function RecaudacionManagement({
 
     // Lógica de Preaprobación Automática Robusta
     // transferDate viene como YYYY-MM-DD desde el input
-    const [year, month, day] = transferDate.split('-');
-    const reversedDate = `${day}-${month}-${year}`; // Formato DD-MM-YYYY común en cartolas
-    const slashDate = `${day}/${month}/${year}`;
-
-    const matchingMovement = movements.find(
-      (m) =>
-        // 1. Comparación de Cuenta (solo dígitos)
-        m.bankAccount.toString().replace(/\D/g, '') === account.accountNumber.replace(/\D/g, '') &&
-        // 2. Comparación de Monto (redondeado para evitar problemas de decimales)
-        Math.round(m.amount) === Math.round(total) &&
-        // 3. Solo movimientos no identificados
-        m.mainIdentification === 'Sin identificar' &&
-        // 4. Comparación de Fecha Flexible
-        // Valida si la fecha de la cartola contiene YYYY-MM-DD o coincide con DD-MM-YYYY
-        (m.date.includes(transferDate) ||
-          m.date.includes(reversedDate) ||
-          m.date.includes(slashDate)) &&
-        // 5. El banco debe coincidir (búsqueda parcial)
-        m.bank.toLowerCase().includes(account.bankName.toLowerCase())
-    );
+    // D 2d: preaprobacion automatica: el match lo resuelve el servidor (endpoint
+    // de candidatos), sin depender de la cartola completa cargada en cliente.
+    const matchingMovement = await findMatchingMovement({
+      bankAccountId: selectedAccId,
+      amount: total,
+      transferDate,
+    });
 
     // Pre-chequeo en cliente (mejor UX); el servidor valida de forma autoritativa
     // contra el historico completo aunque no este cargado en pantalla.
@@ -544,9 +538,20 @@ export function RecaudacionManagement({
           return;
         }
         onReconcile(selectedId, req.documents);
+        // D 2d: guardamos displayId+banco del candidato elegido (denormalizado
+        // optimista) para mostrar el vinculo sin depender de la cartola completa.
+        const chosenMov = (candidatesByReq[reqId] ?? []).find((m) => m.movementId === selectedId);
         setRequests(
           requests.map((r) =>
-            r.id === reqId ? { ...r, status: 'Aprobado', associatedMovementId: selectedId } : r
+            r.id === reqId
+              ? {
+                  ...r,
+                  status: 'Aprobado',
+                  associatedMovementId: selectedId,
+                  associatedMovementDisplayId: chosenMov?.displayId ?? r.associatedMovementDisplayId,
+                  associatedMovementBank: chosenMov?.bank ?? r.associatedMovementBank,
+                }
+              : r
           )
         );
       } else {
@@ -643,6 +648,17 @@ export function RecaudacionManagement({
     try {
       const uploaded = await uploadAttachments(newSupportFilesForRequest, targetId);
       let autoPreapproved = false;
+      // D 2d: resolvemos el match contra el servidor ANTES de actualizar el estado
+      // (no se puede await dentro del updater). Solo aplica si venia Pendiente.
+      const targetReq = requests.find((r) => r.id === targetId);
+      let matchedMov: CartolaMovement | undefined;
+      if (targetReq && targetReq.status === 'Pendiente') {
+        matchedMov = await findMatchingMovement({
+          bankAccountId: targetReq.bankAccountId,
+          amount: targetReq.amount,
+          transferDate: targetReq.transferDate,
+        });
+      }
       setRequests((prev) =>
         prev.map((req) => {
           if (req.id !== targetId) return req;
@@ -651,21 +667,13 @@ export function RecaudacionManagement({
             supportFileName: req.supportFileName || uploaded[0]?.fileName || '',
             attachments: [...(req.attachments ?? []), ...uploaded],
           };
-          // Si venía Pendiente y ahora tiene comprobante, intentamos preaprobar
-          // automáticamente contra un movimiento que calce (el comprobante ya es
-          // obligatorio para preaprobar).
-          if (withFiles.status === 'Pendiente') {
-            const match = req.associatedMovementId
-              ? movements.find((m) => m.movementId === req.associatedMovementId)
-              : findMatchingMovement(withFiles);
-            if (match && match.mainIdentification === 'Sin identificar') {
-              autoPreapproved = true;
-              return {
-                ...withFiles,
-                status: 'Preaprobado',
-                associatedMovementId: match.movementId,
-              };
-            }
+          if (withFiles.status === 'Pendiente' && matchedMov) {
+            autoPreapproved = true;
+            return {
+              ...withFiles,
+              status: 'Preaprobado',
+              associatedMovementId: matchedMov.movementId,
+            };
           }
           return withFiles;
         })
