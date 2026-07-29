@@ -19,11 +19,14 @@ export async function POST(request: Request) {
   const body = await request.json();
   const parsed = schema.safeParse(body);
   if (!parsed.success) {
-    return NextResponse.json({ error: 'Contraseña inválida (mínimo 8 caracteres)' }, { status: 400 });
+    return NextResponse.json(
+      { error: 'Contraseña inválida (mínimo 8 caracteres)' },
+      { status: 400 }
+    );
   }
 
   try {
-    changeUserPassword(email, parsed.data.password);
+    await changeUserPassword(email, parsed.data.password);
     return NextResponse.json({ ok: true });
   } catch (error) {
     const message = error instanceof Error ? error.message : 'No se pudo actualizar contraseña';

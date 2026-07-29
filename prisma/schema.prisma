@@ -1,12 +1,9 @@
-// This is your Prisma schema file,
-// learn more about it in the docs: https://pris.ly/d/prisma-schema
-
-// Looking for ways to speed up your queries, or scale easily with your serverless or edge functions?
-// Try Prisma Accelerate: https://pris.ly/cli/accelerate-init
-
 generator client {
-  provider = "prisma-client-js"
-  output   = "../lib/generated/prisma"
+  provider      = "prisma-client-js"
+  output        = "../lib/generated/prisma"
+  // "native" cubre el entorno local; "linux-musl-openssl-3.0.x" es el engine que
+  // necesita la imagen Docker (node:alpine / musl). Se genera con `prisma generate`.
+  binaryTargets = ["native", "linux-musl-openssl-3.0.x"]
 }
 
 datasource db {
@@ -14,22 +11,522 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
-// Define tus modelos aquí. Por ejemplo, un modelo de Usuario:
 model User {
-  id                   String   @id @default(cuid()) // ID único para el usuario
-  email                String   @unique // Correo electrónico único
-  name                 String?  // Nombre opcional
-  role                 UserRole @default(AgenteCC) // Rol del usuario, por defecto 'AgenteCC' (o el que consideres más adecuado)
-  mustChangePassword   Boolean  @default(false) // Indica si el usuario debe cambiar su contraseña al iniciar sesión
+  id                 String    @id @default(cuid())
+  email              String    @unique
+  name               String?
+  role               UserRole  @default(AgenteCC)
+  mustChangePassword Boolean   @default(false)
+  passwordHash       String?
+  isActive           Boolean   @default(true)
+  createdAt          DateTime  @default(now())
+  updatedAt          DateTime  @updatedAt
+  accounts           Account[]
+  sessions           Session[]
+
+  createdBankAccounts        BankAccount[]               @relation("BankAccountCreatedBy")
+  createdClients             Client[]                    @relation("ClientCreatedBy")
+  uploadedBankImports        BankStatementImport[]       @relation("BankImportUploadedBy")
+  ownedCartolaMovements      CartolaMovement[]           @relation("CartolaMovementOwner")
+  createdCollectionRequests  CollectionRequest[]         @relation("CollectionRequestCreatedBy")
+  reviewedCollectionRequests CollectionRequest[]         @relation("CollectionRequestReviewedBy")
+  uploadedSupportFiles       SupportFile[]               @relation("SupportFileUploadedBy")
+  createdCobranzaDocuments   CobranzaDocument[]          @relation("CobranzaDocumentCreatedBy")
+  createdAllocations         CartolaMovementAllocation[] @relation("AllocationCreatedBy")
+  createdPayments            Payment[]                   @relation("PaymentCreatedBy")
+  createdClosures            Closure[]                   @relation("ClosureCreatedBy")
+  auditLogs                  AuditLog[]                  @relation("AuditActor")
 }
 
-// Enum para los roles de usuario, reflejando el tipo UserRole de tu aplicación.
-// Se usa @map para mantener los nombres originales con espacios si es necesario.
+model Account {
+  id                String  @id @default(cuid())
+  userId            String
+  type              String
+  provider          String
+  providerAccountId String
+  refresh_token     String? @db.Text
+  access_token      String? @db.Text
+  expires_at        Int?
+  token_type        String?
+  scope             String?
+  id_token          String? @db.Text
+  session_state     String?
+  user              User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerAccountId])
+}
+
+model Session {
+  id           String   @id @default(cuid())
+  sessionToken String   @unique
+  userId       String
+  expires      DateTime
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model VerificationToken {
+  identifier String
+  token      String   @unique
+  expires    DateTime
+
+  @@unique([identifier, token])
+}
+
+model BankAccount {
+  id            String   @id @default(cuid())
+  displayId     String   @unique
+  bankName      String
+  accountNumber String
+  country       String
+  currency      String   @default("CLP")
+  taxId         String?
+  legalName     String?
+  isActive      Boolean  @default(true)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+  createdById   String?
+  createdBy     User?    @relation("BankAccountCreatedBy", fields: [createdById], references: [id], onDelete: SetNull)
+
+  movements          CartolaMovement[]
+  collectionRequests CollectionRequest[]
+
+  @@unique([bankName, accountNumber, country])
+  @@index([accountNumber])
+  @@index([country])
+}
+
+model Client {
+  id            String   @id @default(cuid())
+  appCode       String   @unique
+  name          String
+  taxId         String   @unique
+  navitaireCode String?  @unique
+  sapBP         String?  @unique
+  isActive      Boolean  @default(true)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+  createdById   String?
+  createdBy     User?    @relation("ClientCreatedBy", fields: [createdById], references: [id], onDelete: SetNull)
+
+  saleReferences     SaleReference[]
+  collectionRequests CollectionRequest[]
+  cobranzaDocuments  CobranzaDocument[]
+
+  @@index([name])
+}
+
+model SaleReference {
+  id           String            @id @default(cuid())
+  reference    String
+  type         SaleReferenceType @default(PNR)
+  sourceSystem String?
+  clientId     String?
+  client       Client?           @relation(fields: [clientId], references: [id], onDelete: SetNull)
+  saleDate     DateTime?
+  currency     String            @default("CLP")
+  totalAmount  Decimal?          @db.Decimal(18, 2)
+  status       String?
+  metadata     Json?
+  createdAt    DateTime          @default(now())
+  updatedAt    DateTime          @updatedAt
+
+  collectionItems CollectionRequestItem[]
+  documentItems   CobranzaDocumentItem[]
+  allocations     CartolaMovementAllocation[]
+
+  @@unique([type, reference])
+  @@index([reference])
+  @@index([clientId])
+}
+
+model BankStatementImport {
+  id           String            @id @default(cuid())
+  fileName     String
+  rowCount     Int               @default(0)
+  totalAmount  Decimal           @default(0) @db.Decimal(18, 2)
+  status       ImportStatus      @default(Processed)
+  uploadedById String?
+  uploadedBy   User?             @relation("BankImportUploadedBy", fields: [uploadedById], references: [id], onDelete: SetNull)
+  createdAt    DateTime          @default(now())
+  movements    CartolaMovement[]
+}
+
+model CartolaMovement {
+  id                 String                 @id @default(cuid())
+  displayId          String?                @unique // codigo visible: CL-BAN-5678-202606-000123
+  importId           String?
+  import             BankStatementImport?   @relation(fields: [importId], references: [id], onDelete: SetNull)
+  externalReference  String?
+  bankAccountId      String?
+  bankAccount        BankAccount?           @relation(fields: [bankAccountId], references: [id], onDelete: SetNull)
+  bank               String
+  bankAccountNumber  String
+  country            String
+  amount             Decimal                @db.Decimal(18, 2)
+  date               DateTime
+  description        String                 @db.Text
+  extraFields        Json?
+  identificationType MainIdentificationType @default(SinIdentificar)
+  status             MovementStatus         @default(Unidentified)
+  // Fase A — ciclo de vida de cierre contable (consumido por el futuro modulo Contabilidad).
+  closeState         MovementCloseState     @default(Abierto)
+  validatedAt        DateTime? // cuando el movimiento quedo finalmente identificado/validado
+  asientoContableAt  DateTime? // fecha del asiento contable
+  originYear         Int? // ano del periodo de origen (materializado desde `date`)
+  originMonth        Int? // mes del periodo de origen (1-12)
+  finalizedInClosureId String? // cierre donde el movimiento quedo CerradoDefinitivo
+  ownerUserId        String?
+  ownerUser          User?                  @relation("CartolaMovementOwner", fields: [ownerUserId], references: [id], onDelete: SetNull)
+  finalizedInClosure Closure?               @relation("FinalizedInClosure", fields: [finalizedInClosureId], references: [id], onDelete: SetNull)
+  closureItems       ClosureItem[]
+  createdAt          DateTime               @default(now())
+  updatedAt          DateTime               @updatedAt
+
+  allocations       CartolaMovementAllocation[]
+  payments          Payment[]
+  CollectionRequest CollectionRequest[]
+
+  @@index([bankAccountId, date])
+  @@index([bankAccountNumber])
+  @@index([status])
+  @@index([identificationType])
+  @@index([closeState])
+  @@index([originYear, originMonth])
+  @@index([finalizedInClosureId])
+}
+
+model CartolaMovementAllocation {
+  id               String          @id @default(cuid())
+  movementId       String
+  movement         CartolaMovement @relation(fields: [movementId], references: [id], onDelete: Cascade)
+  module           TraceModule
+  sourceEntityType String
+  sourceEntityId   String
+  saleReferenceId  String?
+  saleReference    SaleReference?  @relation(fields: [saleReferenceId], references: [id], onDelete: SetNull)
+  amount           Decimal         @db.Decimal(18, 2)
+  detail           String?
+  createdById      String?
+  createdBy        User?           @relation("AllocationCreatedBy", fields: [createdById], references: [id], onDelete: SetNull)
+  createdAt        DateTime        @default(now())
+  voidedAt         DateTime?
+  voidedReason     String?
+
+  collectionRequestId String?
+  collectionRequest   CollectionRequest? @relation(fields: [collectionRequestId], references: [id], onDelete: SetNull)
+  cobranzaDocumentId  String?
+  cobranzaDocument    CobranzaDocument?  @relation(fields: [cobranzaDocumentId], references: [id], onDelete: SetNull)
+  payments            Payment[]
+
+  @@index([movementId])
+  @@index([sourceEntityType, sourceEntityId])
+  @@index([saleReferenceId])
+}
+
+model CollectionRequest {
+  id                   String           @id @default(cuid())
+  requestNumber        String           @unique
+  bankAccountId        String
+  bankAccount          BankAccount      @relation(fields: [bankAccountId], references: [id])
+  transferDate         DateTime
+  amount               Decimal          @db.Decimal(18, 2)
+  clientId             String
+  client               Client           @relation(fields: [clientId], references: [id])
+  supportFileId        String?
+  supportFile          SupportFile?     @relation("PrimarySupport", fields: [supportFileId], references: [id], onDelete: SetNull)
+  attachments          SupportFile[]    @relation("RequestAttachments")
+  status               CollectionStatus @default(Pendiente)
+  associatedMovementId String?
+  associatedMovement   CartolaMovement? @relation(fields: [associatedMovementId], references: [id], onDelete: SetNull)
+  rejectionComment     String?
+  authorizationCode    String? // codigo de autorizacion (alfanumerico) del comprobante bancario
+  infoRequestComment   String? // comentario de Recaudacion al solicitar SWIFT/MT103
+  infoRequestedAt      DateTime? // cuando Recaudacion solicito informacion adicional
+  // Marcas de tiempo por etapa (para el informe de tiempos del Agente CC).
+  preapprovedAt        DateTime? // primera vez que llego a Preaprobado
+  approvedAt           DateTime? // primera vez que llego a Aprobado
+  gestionadoCcAt       DateTime? // cuando el Agente CC marco Gestionado CC
+  reversedAt           DateTime? // ultima vez que Recaudacion reverso (Aprobado/Gestionado -> revision)
+  createdById          String?
+  createdBy            User?            @relation("CollectionRequestCreatedBy", fields: [createdById], references: [id], onDelete: SetNull)
+  reviewedById         String?
+  reviewedBy           User?            @relation("CollectionRequestReviewedBy", fields: [reviewedById], references: [id], onDelete: SetNull)
+  reviewedAt           DateTime?
+  createdAt            DateTime         @default(now())
+  updatedAt            DateTime         @updatedAt
+
+  items       CollectionRequestItem[]
+  allocations CartolaMovementAllocation[]
+
+  @@index([clientId])
+  @@index([status])
+  @@index([associatedMovementId])
+  @@index([authorizationCode])
+}
+
+model CollectionRequestItem {
+  id                  String            @id @default(cuid())
+  collectionRequestId String
+  collectionRequest   CollectionRequest @relation(fields: [collectionRequestId], references: [id], onDelete: Cascade)
+  saleReferenceId     String?
+  saleReference       SaleReference?    @relation(fields: [saleReferenceId], references: [id], onDelete: SetNull)
+  reference           String
+  amount              Decimal           @db.Decimal(18, 2)
+  detail              String?
+
+  @@index([reference])
+  @@index([saleReferenceId])
+}
+
+model SupportFile {
+  id                  String              @id @default(cuid())
+  fileName            String
+  mimeType            String?
+  sizeBytes           Int?
+  storageKey          String?
+  checksum            String?
+  backend             StorageBackend      @default(Db)
+  collectionRequestId String?
+  collectionRequest   CollectionRequest?  @relation("RequestAttachments", fields: [collectionRequestId], references: [id], onDelete: Cascade)
+  uploadedById        String?
+  uploadedBy          User?               @relation("SupportFileUploadedBy", fields: [uploadedById], references: [id], onDelete: SetNull)
+  createdAt           DateTime            @default(now())
+  collectionRequests  CollectionRequest[] @relation("PrimarySupport")
+
+  @@index([collectionRequestId])
+}
+
+enum StorageBackend {
+  Db
+  S3
+}
+
+model FileBlob {
+  id        String   @id
+  data      Bytes
+  createdAt DateTime @default(now())
+}
+
+model CobranzaDocument {
+  id             String                 @id @default(cuid())
+  documentNumber String
+  type           CobranzaDocumentType
+  date           DateTime
+  country        String
+  currency       String                 @default("CLP")
+  clientId       String
+  client         Client                 @relation(fields: [clientId], references: [id])
+  totalAmount    Decimal                @db.Decimal(18, 2)
+  pendingAmount  Decimal                @db.Decimal(18, 2)
+  status         CobranzaDocumentStatus @default(Pendiente)
+  sourceSystem   String?
+  metadata       Json?
+  createdById    String?
+  createdBy      User?                  @relation("CobranzaDocumentCreatedBy", fields: [createdById], references: [id], onDelete: SetNull)
+  createdAt      DateTime               @default(now())
+  updatedAt      DateTime               @updatedAt
+
+  items              CobranzaDocumentItem[]
+  payments           Payment[]                   @relation("DocumentPayments")
+  creditNotePayments Payment[]                   @relation("CreditNotePayments")
+  allocations        CartolaMovementAllocation[]
+
+  @@unique([documentNumber, type])
+  @@index([clientId])
+  @@index([status])
+}
+
+model CobranzaDocumentItem {
+  id              String           @id @default(cuid())
+  documentId      String
+  document        CobranzaDocument @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  saleReferenceId String?
+  saleReference   SaleReference?   @relation(fields: [saleReferenceId], references: [id], onDelete: SetNull)
+  reference       String
+  amount          Decimal          @db.Decimal(18, 2)
+  detail          String?
+
+  @@index([reference])
+  @@index([saleReferenceId])
+}
+
+model Payment {
+  id                   String                     @id @default(cuid())
+  documentId           String
+  document             CobranzaDocument           @relation("DocumentPayments", fields: [documentId], references: [id], onDelete: Cascade)
+  sourceType           PaymentSourceType
+  movementId           String?
+  movement             CartolaMovement?           @relation(fields: [movementId], references: [id], onDelete: SetNull)
+  allocationId         String?
+  allocation           CartolaMovementAllocation? @relation(fields: [allocationId], references: [id], onDelete: SetNull)
+  creditNoteDocumentId String?
+  creditNoteDocument   CobranzaDocument?          @relation("CreditNotePayments", fields: [creditNoteDocumentId], references: [id], onDelete: SetNull)
+  amount               Decimal                    @db.Decimal(18, 2)
+  date                 DateTime
+  bank                 String?
+  createdById          String?
+  createdBy            User?                      @relation("PaymentCreatedBy", fields: [createdById], references: [id], onDelete: SetNull)
+  createdAt            DateTime                   @default(now())
+  voidedAt             DateTime?
+  voidedReason         String?
+
+  @@index([documentId])
+  @@index([movementId])
+  @@index([allocationId])
+  @@index([creditNoteDocumentId])
+}
+
+model AuditLog {
+  id         String       @id @default(cuid())
+  actorId    String?
+  actor      User?        @relation("AuditActor", fields: [actorId], references: [id], onDelete: SetNull)
+  action     String
+  module     TraceModule?
+  entityType String
+  entityId   String
+  before     Json?
+  after      Json?
+  metadata   Json?
+  ipAddress  String?
+  userAgent  String?
+  createdAt  DateTime     @default(now())
+
+  @@index([actorId])
+  @@index([entityType, entityId])
+  @@index([module])
+  @@index([createdAt])
+}
+
 enum UserRole {
   Administrador
   Contabilidad
-  Recaudacion
-  ConciliacionMediosDePago @map("Conciliación medios de pago") // Mapeo para nombres con espacios
-  AgenteCC                 @map("Agente CC") // Mapeo para nombres con espacios
+  Recaudacion              @map("Recaudación")
+  ConciliacionMediosDePago @map("Conciliación medios de pago")
+  AgenteCC                 @map("Agente CC")
   Cobranza
+}
+
+enum SaleReferenceType {
+  PNR
+  Ticket
+  Order
+  InvoiceLine
+  Other
+}
+
+enum ImportStatus {
+  Processed
+  Failed
+  Reversed
+}
+
+enum MainIdentificationType {
+  SinIdentificar  @map("Sin identificar")
+  Adquiriente
+  GC
+  CobranzaCredito @map("Cobranza crédito")
+  AbonoDebito     @map("Abono débito")
+}
+
+enum MovementStatus {
+  Unidentified
+  PartiallyAllocated
+  FullyAllocated
+  Reversed
+}
+
+enum MovementCloseState {
+  Abierto
+  CerradoParcial
+  CerradoDefinitivo
+}
+
+enum TraceModule {
+  Cartola
+  Recaudacion
+  Cobranza
+  Contabilidad
+  Clientes
+  Usuarios
+  Sistema
+}
+
+enum CollectionStatus {
+  Pendiente
+  Preaprobado
+  Aprobado
+  Rechazado
+  Anulado
+  InformacionSolicitada
+  GestionadoCC
+}
+
+enum CobranzaDocumentType {
+  Factura
+  NotaDeCobro   @map("Nota de cobro")
+  NotaDeCredito @map("Nota de Crédito")
+}
+
+enum CobranzaDocumentStatus {
+  Pendiente
+  Pagado
+  Parcial
+  Anulado
+}
+
+enum PaymentSourceType {
+  BankMovement
+  CreditNote
+  ManualAdjustment
+}
+
+model Closure {
+  id               String   @id @default(cuid())
+  label            String? // nombre opcional del cierre
+  dateFrom         DateTime // inicio del rango (por fecha bancaria del movimiento)
+  dateTo           DateTime // fin del rango
+  createdById      String?
+  createdBy        User?    @relation("ClosureCreatedBy", fields: [createdById], references: [id], onDelete: SetNull)
+  createdAt        DateTime @default(now())
+  // Snapshot al generar el cierre
+  totalCount       Int?
+  identifiedCount  Int?
+  pendingCount     Int?
+  totalAmount      Decimal? @db.Decimal(18, 2)
+  identifiedAmount Decimal? @db.Decimal(18, 2)
+  pendingAmount    Decimal? @db.Decimal(18, 2)
+
+  items              ClosureItem[]
+  finalizedMovements CartolaMovement[] @relation("FinalizedInClosure")
+
+  @@index([dateFrom, dateTo])
+}
+
+model ClosureItem {
+  id                   String                 @id @default(cuid())
+  closureId            String
+  closure              Closure                @relation(fields: [closureId], references: [id], onDelete: Cascade)
+  movementId           String
+  movement             CartolaMovement        @relation(fields: [movementId], references: [id], onDelete: Cascade)
+  // Snapshot del movimiento EN este cierre
+  closeState           MovementCloseState // CerradoParcial o CerradoDefinitivo
+  identificationType   MainIdentificationType // categoria al momento del cierre
+  amount               Decimal                @db.Decimal(18, 2)
+  originYear           Int
+  originMonth          Int
+  // Si este item finaliza un pendiente arrastrado de un cierre anterior
+  carriedFromClosureId String?
+  createdAt            DateTime               @default(now())
+
+  @@unique([closureId, movementId])
+  @@index([closureId])
+  @@index([movementId])
+}
+
+model AccountingCategory {
+  category    String   @id // Adquiriente | GC | CobranzaCredito | AbonoDebito | SinIdentificar
+  accountCode String? // cuenta contable para el resumen del cierre
+  accountName String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
 }

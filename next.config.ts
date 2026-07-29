@@ -35,6 +35,11 @@ const securityHeaders = [
 
 const nextConfig: NextConfig = {
   output: 'standalone',
+  // Incluye el binario del query engine de Prisma en el bundle 'standalone'
+  // (el runner solo copia .next/standalone; sin esto el engine no viaja).
+  outputFileTracingIncludes: {
+    '/**': ['./lib/generated/prisma/**/*'],
+  },
   async headers() {
     return [
       {

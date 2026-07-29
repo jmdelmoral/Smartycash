@@ -1,12 +1,14 @@
 /**
  * Configuration and helper utilities for authentication.
  */
+import { PrismaAdapter } from '@next-auth/prisma-adapter';
 import * as jose from 'jose';
 import type { NextAuthOptions } from 'next-auth';
 import CredentialsProvider from 'next-auth/providers/credentials';
 import KeycloakProvider from 'next-auth/providers/keycloak';
 import { z } from 'zod';
 
+import prisma from '@/lib/prisma';
 import { authenticateUser, ensureSeedAdminUser, getUserByEmail } from '@/lib/user-store';
 
 interface KeycloakJwtPayload extends jose.JWTPayload {
@@ -30,12 +32,29 @@ const isKeycloakConfigured =
   !!(process.env.KEYCLOAK_ID && process.env.KEYCLOAK_SECRET && process.env.KEYCLOAK_ISSUER);
 
 /**
+ * Secret used to sign session JWTs. There is NO hardcoded fallback on purpose:
+ * a shared/default secret would let anyone forge valid sessions. When auth is
+ * enabled the secret is mandatory and the app fails fast if it is missing.
+ */
+const authSecret = process.env.NEXTAUTH_SECRET;
+if (isAuthEnabled && !authSecret) {
+  throw new Error(
+    'NEXTAUTH_SECRET no está definido. Genera uno (por ejemplo `openssl rand -base64 32`) ' +
+      'y configúralo antes de habilitar la autenticación (AUTH_ENABLED=true).'
+  );
+}
+
+/**
  * Configuration options for NextAuth.js.
  * This is the central place for all authentication configurations.
  * @see https://next-auth.js.org/configuration/options
  */
 export const authOptions: NextAuthOptions = {
-  secret: process.env.NEXTAUTH_SECRET ?? 'dev-smartycash-secret-change-this',
+  secret: authSecret,
+  adapter: PrismaAdapter(prisma),
+  session: {
+    strategy: 'jwt',
+  },
   providers: [
     CredentialsProvider({
       name: 'Credenciales SmartyCash',
@@ -44,26 +63,38 @@ export const authOptions: NextAuthOptions = {
         password: { label: 'Contraseña', type: 'password' },
       },
       async authorize(credentials) {
-        ensureSeedAdminUser();
-        const credentialsSchema = z.object({
-          email: z.string().trim().email(),
-          password: z.string().min(1),
-        });
-        const parsed = credentialsSchema.safeParse(credentials);
-        if (!parsed.success) {
+        try {
+          await ensureSeedAdminUser();
+          const credentialsSchema = z.object({
+            email: z.string().trim().email(),
+            password: z.string().min(1),
+          });
+          const parsed = credentialsSchema.safeParse(credentials);
+          if (!parsed.success) {
+            console.warn('[auth] Credenciales con formato inválido (email/clave vacíos).');
+            return null;
+          }
+          const user = await authenticateUser(parsed.data.email, parsed.data.password);
+          if (!user) {
+            console.warn(
+              `[auth] Login fallido para "${parsed.data.email}": usuario inexistente/inactivo o contraseña incorrecta. ` +
+                `(largo de clave recibida: ${parsed.data.password.length})`
+            );
+            return null;
+          }
+          return {
+            id: user.id,
+            name: user.name,
+            email: user.email,
+            role: user.role,
+            mustChangePassword: user.mustChangePassword,
+          };
+        } catch (err) {
+          // Un error aquí (p. ej. de Prisma/conexión) hace que NextAuth devuelva
+          // 401. Lo logueamos para no diagnosticar a ciegas.
+          console.error('[auth] Error en authorize (posible fallo de base/conexión):', err);
           return null;
         }
-        const user = authenticateUser(parsed.data.email, parsed.data.password);
-        if (!user) {
-          return null;
-        }
-        return {
-          id: user.id,
-          name: user.name,
-          email: user.email,
-          role: user.role,
-          mustChangePassword: user.mustChangePassword,
-        };
       },
     }),
     ...(isKeycloakConfigured
@@ -121,7 +152,7 @@ export const authOptions: NextAuthOptions = {
       }
 
       if (token.email) {
-        const storedUser = getUserByEmail(String(token.email));
+        const storedUser = await getUserByEmail(String(token.email));
         if (storedUser) {
           token.roles = [storedUser.role];
           token.mustChangePassword = storedUser.mustChangePassword;
@@ -143,5 +174,6 @@ export const authOptions: NextAuthOptions = {
       return session;
     },
   },
-  debug: process.env.NODE_ENV === 'development',
+  // Opt-in explícito para evitar logs verbosos de auth por defecto (incl. en dev).
+  debug: process.env.NEXTAUTH_DEBUG === 'true',
 };
