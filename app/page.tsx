@@ -5,6 +5,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import * as XLSX from 'xlsx';
 import { z } from 'zod';
 
+import { AdquirienteManagement } from '@/components/AdquirienteManagement';
 import { BankAccountManagement } from '@/components/BankAccountManagement';
 import { BankStatementManagement } from '@/components/BankStatementManagement';
 import { ClientManagement } from '@/components/ClientManagement';
@@ -18,8 +19,8 @@ import { Input } from '@/components/ui/input';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { UserManagement } from '@/components/UserManagement';
 import {
+  Adquiriente,
   BankAccount,
-  CartolaMovement,
   CartolaDocument,
   Client,
   CollectionRequest,
@@ -38,6 +39,7 @@ type ApplicationTab =
   | 'usuarios'
   | 'cuentas'
   | 'clientes'
+  | 'adquirientes'
   | 'cartola'
   | 'recaudacion'
   | 'contabilidad'
@@ -45,18 +47,34 @@ type ApplicationTab =
 
 const ROLE_ACCESS: Record<ApplicationTab, UserRole[]> = {
   usuarios: ['Administrador'],
-  cuentas: ['Administrador', 'Recaudacion', 'Cobranza'],
-  clientes: ['Administrador', 'AgenteCC', 'Recaudacion'],
+  cuentas: [
+    'Administrador',
+    'Recaudacion',
+    'Cobranza',
+    'Contabilidad',
+    'ConciliacionMediosDePago',
+    'AgenteCC',
+  ],
+  clientes: [
+    'Administrador',
+    'AgenteCC',
+    'Recaudacion',
+    'Cobranza',
+    'Contabilidad',
+    'ConciliacionMediosDePago',
+  ],
+  adquirientes: ['Administrador', 'ConciliacionMediosDePago'],
   cartola: ['Contabilidad', 'Recaudacion', 'ConciliacionMediosDePago', 'Cobranza'],
-  recaudacion: ['Recaudacion', 'Contabilidad', 'AgenteCC', 'Cobranza'],
+  recaudacion: ['Recaudacion', 'AgenteCC', 'Cobranza'],
   contabilidad: ['Contabilidad'],
-  'cobranza-credito': ['Cobranza'],
+  'cobranza-credito': ['Cobranza', 'Recaudacion'],
 };
 
 const tabLabel: Record<ApplicationTab, string> = {
   cartola: 'Cartola',
   cuentas: 'Cuentas Bancarias',
   clientes: 'Clientes',
+  adquirientes: 'Adquirientes',
   recaudacion: 'Recaudación grupos y charters',
   contabilidad: 'Contabilidad',
   'cobranza-credito': 'Cobranza crédito',
@@ -75,36 +93,24 @@ export default function HomePage() {
   const businessDataLoadedRef = useRef(false);
   // Baseline of IDs the client has loaded, per module. Sent as knownIds so the
   // server only reverses/annuls records this client actually knew about.
-  const knownMovementIdsRef = useRef<Set<string>>(new Set());
   const knownRequestIdsRef = useRef<Set<string>>(new Set());
   const knownDocIdsRef = useRef<Set<string>>(new Set());
-  // Sincronización de Cartola: evita POSTs solapados (que colisionarían en el
-  // displayId único) y reintenta si llegaron cambios mientras había uno en vuelo.
-  const cartolaSyncInFlightRef = useRef(false);
-  const cartolaSyncDirtyRef = useRef(false);
-  // Cuando refrescamos movimientos desde el servidor tras un guardado, saltamos
-  // UNA re-sincronización para no crear un bucle sync -> refetch -> sync.
-  const suppressCartolaSyncRef = useRef(false);
-  // Igual para la sincronización de Recaudación (guarda solicitudes y, del lado
-  // servidor, reconcilia atómicamente el movimiento asociado).
+  // Sincronización de Recaudación (guarda solicitudes y, del lado servidor,
+  // reconcilia atómicamente el movimiento asociado).
   const recaudacionSyncInFlightRef = useRef(false);
   const recaudacionSyncDirtyRef = useRef(false);
   const suppressRecaudacionSyncRef = useRef(false);
 
   // Estado global de cuentas bancarias permitidas (Simulado)
   const [bankAccounts, setBankAccounts] = useState<BankAccount[]>([]);
-  /*
-    { id: 'ACC-2', bankName: 'BCP', accountNumber: '987654321', country: 'Perú' },
-
-  // Lifting movements state to synchronize Cartola and Recaudación
-  */
-  const [movements, setMovements] = useState<CartolaMovement[]>([]);
-  // Referencia siempre actualizada de los movimientos (para el re-sync diferido).
-  const movementsRef = useRef<CartolaMovement[]>(movements);
-  movementsRef.current = movements;
+  // Fase 5 (D 3c): Cartola ya NO usa un array compartido en page.tsx. Cada módulo se
+  // autoabastece por endpoint (Cartola lee su página y persiste por registro;
+  // Cobranza aplica/reversa pagos por endpoint). Se eliminó el estado `movements` y
+  // el `syncCartola` para no "pisar" las asignaciones creadas server-side.
 
   // Lifting Clients state
   const [clients, setClients] = useState<Client[]>([]);
+  const [adquirientes, setAdquirientes] = useState<Adquiriente[]>([]);
   /*
     { id: 'CLI-2', name: 'Turavion', taxId: '88.987.654-3' },
 
@@ -166,7 +172,11 @@ export default function HomePage() {
   }, [effectiveSession?.user?.role]);
 
   useEffect(() => {
-    if (currentStatus !== 'authenticated' || !isAuthEnabled) return;
+    // Nota: en modo SIN login (AUTH_ENABLED=false) también cargamos datos maestros.
+    // El servidor entrega una sesión de desarrollo (getAppSession) para el rol
+    // Administrador, así que las llamadas funcionan y `businessLoading` se resuelve
+    // (antes quedaba en true y la tabla de Cartola se quedaba "Cargando…" para siempre).
+    if (currentStatus !== 'authenticated') return;
 
     const loadMasterData = async () => {
       setMasterDataError(null);
@@ -175,13 +185,13 @@ export default function HomePage() {
         const [
           bankAccountsResponse,
           clientsResponse,
-          movementsResponse,
+          adquirientesResponse,
           requestsResponse,
           cobranzaResponse,
         ] = await Promise.all([
           fetch('/api/bank-accounts'),
           fetch('/api/clients'),
-          fetch('/api/cartola/movements'),
+          fetch('/api/adquirientes'),
           fetch('/api/recaudacion/requests'),
           fetch('/api/cobranza/documents'),
         ]);
@@ -189,7 +199,7 @@ export default function HomePage() {
         if (
           !bankAccountsResponse.ok ||
           !clientsResponse.ok ||
-          !movementsResponse.ok ||
+          !adquirientesResponse.ok ||
           !requestsResponse.ok ||
           !cobranzaResponse.ok
         ) {
@@ -200,8 +210,8 @@ export default function HomePage() {
           accounts: BankAccount[];
         };
         const clientsPayload = (await clientsResponse.json()) as { clients: Client[] };
-        const movementsPayload = (await movementsResponse.json()) as {
-          movements: CartolaMovement[];
+        const adquirientesPayload = (await adquirientesResponse.json()) as {
+          adquirientes: Adquiriente[];
         };
         const requestsPayload = (await requestsResponse.json()) as {
           requests: CollectionRequest[];
@@ -212,12 +222,9 @@ export default function HomePage() {
 
         setBankAccounts(bankAccountsPayload.accounts);
         setClients(clientsPayload.clients);
-        setMovements(movementsPayload.movements);
+        setAdquirientes(adquirientesPayload.adquirientes);
         setRequests(requestsPayload.requests);
         setCobranzaDocs(cobranzaPayload.documents);
-        knownMovementIdsRef.current = new Set(
-          movementsPayload.movements.map((m) => m.movementId)
-        );
         knownRequestIdsRef.current = new Set(requestsPayload.requests.map((r) => r.id));
         knownDocIdsRef.current = new Set(cobranzaPayload.documents.map((d) => d.id));
         businessDataLoadedRef.current = true;
@@ -323,82 +330,66 @@ export default function HomePage() {
     );
   };
 
-  const syncCartola = useCallback(async (payload: CartolaMovement[]) => {
-    if (payload.length === 0) return;
-    // Un solo POST en vuelo a la vez: dos concurrentes podrían calcular el
-    // mismo correlativo de displayId y colisionar en la restricción única.
-    if (cartolaSyncInFlightRef.current) {
-      cartolaSyncDirtyRef.current = true;
+  // #9 Validar cliente (Recaudación/Cobranza/Admin): marca "Validado". Los códigos
+  // Navitaire/BP SAP se completan antes con "Modificar" si hacen falta.
+  const handleValidateClient = async (id: string) => {
+    const response = await fetch('/api/clients', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id, validationStatus: 'Validado' }),
+    });
+    const payload = (await response.json()) as { client?: Client; error?: string };
+    if (!response.ok || !payload.client) {
+      setMasterDataError(payload.error ?? 'No se pudo validar el cliente.');
       return;
     }
-    cartolaSyncInFlightRef.current = true;
-    try {
-      // Upsert NO destructivo de los movimientos en memoria. Las reversiones
-      // (eliminar) se manejan aparte con DELETE desde la vista de Cartola.
-      const res = await fetch('/api/cartola/movements', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ movements: payload }),
-      });
-      // IMPORTANTE: fetch NO lanza en respuestas 4xx/5xx, así que hay que
-      // revisar res.ok explícitamente. Antes esto se ignoraba y los cambios
-      // rechazados por el servidor se perdían en silencio al recargar.
-      if (!res.ok) {
-        const data = (await res.json().catch(() => ({}))) as { error?: string };
-        setMasterDataError(
-          `Sincronización de Cartola: ${data.error ?? 'no fue posible guardar.'} Tus últimos cambios NO se guardaron; corrige e inténtalo de nuevo antes de recargar.`
-        );
-      } else {
-        // Limpia solo un error PREVIO de sincronización de Cartola (no toca
-        // errores de otros módulos que comparten este estado).
-        setMasterDataError((prev) =>
-          prev && prev.startsWith('Sincronización de Cartola:') ? null : prev
-        );
-        // Refresca desde el servidor para reflejar campos calculados por el
-        // backend (código visible displayId, estado). Evita tener que recargar
-        // la página a mano para ver el CL-BAN-...
-        try {
-          const refetch = await fetch('/api/cartola/movements', { cache: 'no-store' });
-          if (refetch.ok) {
-            const fresh = (await refetch.json()) as { movements: CartolaMovement[] };
-            suppressCartolaSyncRef.current = true;
-            knownMovementIdsRef.current = new Set(
-              (fresh.movements ?? []).map((m) => m.movementId)
-            );
-            setMovements(fresh.movements ?? []);
-          }
-        } catch {
-          /* refresh best-effort: si falla, los datos locales siguen visibles */
-        }
-      }
-    } catch {
-      setMasterDataError(
-        'Sincronización de Cartola: error de red. Tus últimos cambios NO se guardaron; no recargues hasta reintentar.'
-      );
-    } finally {
-      cartolaSyncInFlightRef.current = false;
-      // Si llegaron cambios mientras había un POST en vuelo, re-sincroniza el
-      // estado más reciente para no perderlos.
-      if (cartolaSyncDirtyRef.current) {
-        cartolaSyncDirtyRef.current = false;
-        void syncCartola(movementsRef.current);
-      }
-    }
-  }, []);
+    setClients((prev) => prev.map((current) => (current.id === id ? payload.client! : current)));
+  };
 
-  useEffect(() => {
-    if (!businessDataLoadedRef.current || currentStatus !== 'authenticated') return;
-    // Este cambio de `movements` vino de un refetch post-guardado: no re-sincronizar.
-    if (suppressCartolaSyncRef.current) {
-      suppressCartolaSyncRef.current = false;
+  // ---- Adquirientes (Conciliación medios de pago) ----
+  const handleAddAdquiriente = async (adquiriente: Adquiriente) => {
+    const response = await fetch('/api/adquirientes', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(adquiriente),
+    });
+    const payload = (await response.json()) as { adquiriente?: Adquiriente; error?: string };
+    if (!response.ok || !payload.adquiriente) {
+      setMasterDataError(payload.error ?? 'No se pudo crear el adquiriente.');
       return;
     }
-    const timeout = window.setTimeout(() => {
-      void syncCartola(movementsRef.current);
-    }, 600);
+    setAdquirientes((prev) => [payload.adquiriente!, ...prev]);
+  };
 
-    return () => window.clearTimeout(timeout);
-  }, [currentStatus, movements, syncCartola]);
+  const handleUpdateAdquiriente = async (adquiriente: Adquiriente) => {
+    const response = await fetch('/api/adquirientes', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(adquiriente),
+    });
+    const payload = (await response.json()) as { adquiriente?: Adquiriente; error?: string };
+    if (!response.ok || !payload.adquiriente) {
+      setMasterDataError(payload.error ?? 'No se pudo modificar el adquiriente.');
+      return;
+    }
+    setAdquirientes((prev) =>
+      prev.map((current) => (current.id === adquiriente.id ? payload.adquiriente! : current))
+    );
+  };
+
+  const handleDeactivateAdquiriente = async (id: string) => {
+    const response = await fetch('/api/adquirientes', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id, isActive: false }),
+    });
+    const payload = (await response.json()) as { adquiriente?: Adquiriente; error?: string };
+    if (!response.ok || !payload.adquiriente) {
+      setMasterDataError(payload.error ?? 'No se pudo desactivar el adquiriente.');
+      return;
+    }
+    setAdquirientes((prev) => prev.map((current) => (current.id === id ? payload.adquiriente! : current)));
+  };
 
   const syncRecaudacion = useCallback(async (payload: CollectionRequest[]) => {
     const ids = payload.map((r) => r.id);
@@ -425,22 +416,10 @@ export default function HomePage() {
       setMasterDataError((prev) =>
         prev && prev.startsWith('Sincronización de Recaudación:') ? null : prev
       );
-      // Refresca SOLO los movimientos desde el servidor para reflejar la
-      // reconciliación atómica (identificar/liberar). NO refrescamos las
-      // solicitudes: su estado lo maneja el cliente y ya se persistió con el PUT;
-      // refrescarlas pisaría cambios optimistas aún no sincronizados (causaba que
-      // una solicitud recién validada "volviera" a Pendiente/Preaprobado).
-      try {
-        const movRes = await fetch('/api/cartola/movements', { cache: 'no-store' });
-        if (movRes.ok) {
-          const fresh = (await movRes.json()) as { movements: CartolaMovement[] };
-          suppressCartolaSyncRef.current = true;
-          knownMovementIdsRef.current = new Set((fresh.movements ?? []).map((m) => m.movementId));
-          setMovements(fresh.movements ?? []);
-        }
-      } catch {
-        /* refresh best-effort */
-      }
+      // La reconciliación del movimiento asociado la hace el servidor de forma
+      // atómica en el PUT. Recaudación muestra el vínculo con los campos
+      // denormalizados (associatedMovementDisplayId/Bank) que ya trae la solicitud,
+      // así que ya no necesitamos refrescar el array de Cartola aquí.
     } catch {
       setMasterDataError('Sincronización de Recaudación: error de red. Tus últimos cambios NO se guardaron.');
     } finally {
@@ -560,6 +539,7 @@ export default function HomePage() {
     'cobranza-credito',
     'contabilidad',
     'clientes',
+    'adquirientes',
     'cuentas',
     'usuarios',
   ];
@@ -687,6 +667,8 @@ export default function HomePage() {
                 onAddAccount={handleAddBankAccount}
                 onUpdateAccount={handleUpdateBankAccount}
                 onDeleteAccount={handleDeactivateBankAccount}
+                userRole={activeRole}
+                loading={businessLoading}
               />
             </TabsContent>
 
@@ -696,6 +678,23 @@ export default function HomePage() {
                 onAddClient={handleAddClient}
                 onUpdateClient={handleUpdateClient}
                 onDeleteClient={handleDeactivateClient}
+                onValidateClient={handleValidateClient}
+                onClientsBulkLoaded={setClients}
+                userRole={activeRole}
+                currentUserId={session?.user?.id}
+                loading={businessLoading}
+              />
+            </TabsContent>
+
+            <TabsContent value="adquirientes">
+              <AdquirienteManagement
+                adquirientes={adquirientes}
+                onAddAdquiriente={handleAddAdquiriente}
+                onUpdateAdquiriente={handleUpdateAdquiriente}
+                onDeleteAdquiriente={handleDeactivateAdquiriente}
+                onAdquirientesBulkLoaded={setAdquirientes}
+                userRole={activeRole}
+                loading={businessLoading}
               />
             </TabsContent>
 
@@ -708,8 +707,7 @@ export default function HomePage() {
                 <BankStatementManagement
                   availableAccounts={activeBankAccounts}
                   clients={activeClients}
-                  movements={movements}
-                  setMovements={setMovements}
+                  adquirientes={adquirientes}
                   loading={businessLoading}
                 />
               )}
@@ -720,11 +718,10 @@ export default function HomePage() {
                 userRole={activeRole}
                 bankAccounts={activeBankAccounts}
                 clients={activeClients}
-                movements={movements}
-                setMovements={setMovements}
                 requests={requests}
                 setRequests={setRequests}
                 onReconcile={handleReconcileFromRecaudacion}
+                loading={businessLoading}
               />
             </TabsContent>
 
@@ -742,10 +739,9 @@ export default function HomePage() {
               <CobranzaManagement
                 userRole={activeRole}
                 clients={activeClients}
-                movements={movements}
-                setMovements={setMovements} // <--- Esta es la línea que faltaba
                 cobranzaDocs={cobranzaDocs}
                 setCobranzaDocs={setCobranzaDocs}
+                loading={businessLoading}
               />
             </TabsContent>
           </Tabs>
