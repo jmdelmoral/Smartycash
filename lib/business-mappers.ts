@@ -28,6 +28,10 @@ type CollectionWithItems = PrismaCollectionRequest & {
   supportFile: { fileName: string } | null;
   items: CollectionRequestItem[];
   attachments?: { id: string; fileName: string; mimeType: string | null }[];
+  // D 2c: movimiento de cartola asociado (denormalizado para la UI).
+  associatedMovement?: { displayId: string | null; bank: string } | null;
+  // Agente que ingresó la solicitud (para mostrar en el dashboard de Recaudación).
+  createdBy?: { name: string | null; email: string } | null;
 };
 
 type CobranzaWithItemsAndPayments = PrismaCobranzaDocument & {
@@ -71,8 +75,12 @@ export function prismaIdentificationToUi(value: string): MainIdentificationType 
 export function movementStatusFromDocuments(
   movement: Pick<CartolaMovement, 'amount' | 'documents'> & { mainIdentification: string }
 ) {
+  if (movement.mainIdentification === 'Sin identificar') return 'Unidentified';
+  // Adquiriente se identifica por adquiriente + canal (sin documentos/PNR), así que
+  // queda totalmente identificado aunque no tenga documentos.
+  if (movement.mainIdentification === 'Adquiriente') return 'FullyAllocated';
   const used = movement.documents.reduce((sum, document) => sum + document.amount, 0);
-  if (movement.mainIdentification === 'Sin identificar' || used <= 0) return 'Unidentified';
+  if (used <= 0) return 'Unidentified';
   if (used + 0.01 < movement.amount) return 'PartiallyAllocated';
   return 'FullyAllocated';
 }
@@ -107,6 +115,9 @@ export function cartolaToUi(movement: CartolaWithAllocations): CartolaMovement {
     mainIdentification: prismaIdentificationToUi(movement.identificationType),
     mainIdentificationId: movement.allocations[0]?.sourceEntityId ?? '',
     documents,
+    adquirienteId: movement.adquirienteId ?? null,
+    salesChannel: (movement.salesChannel as CartolaMovement['salesChannel']) ?? null,
+    closeState: movement.closeState as CartolaMovement['closeState'],
   };
 }
 
@@ -119,9 +130,14 @@ export function collectionToUi(request: CollectionWithItems): CollectionRequest 
     clientId: request.clientId,
     supportFileName: request.supportFile?.fileName ?? '',
     authorizationCode: request.authorizationCode ?? undefined,
+    quotationId: request.quotationId ?? undefined,
     status: request.status as CollectionStatus,
+    financeApproved: request.financeApproved ?? false,
+    financeApprovedAt: request.financeApprovedAt ? request.financeApprovedAt.toISOString() : null,
     rejectionComment: request.rejectionComment ?? undefined,
     associatedMovementId: request.associatedMovementId ?? undefined,
+    associatedMovementDisplayId: request.associatedMovement?.displayId ?? undefined,
+    associatedMovementBank: request.associatedMovement?.bank ?? undefined,
     infoRequestComment: request.infoRequestComment ?? undefined,
     infoRequestedAt: request.infoRequestedAt ? request.infoRequestedAt.toISOString() : undefined,
     // Marcas de tiempo por etapa (informe de tiempos del Agente CC).
@@ -130,6 +146,12 @@ export function collectionToUi(request: CollectionWithItems): CollectionRequest 
     approvedAt: request.approvedAt ? request.approvedAt.toISOString() : undefined,
     gestionadoCcAt: request.gestionadoCcAt ? request.gestionadoCcAt.toISOString() : undefined,
     reversedAt: request.reversedAt ? request.reversedAt.toISOString() : undefined,
+    // Fecha de revisión (aprobación/rechazo por Recaudación).
+    reviewedAt: request.reviewedAt ? request.reviewedAt.toISOString() : undefined,
+    // Última acción sobre la solicitud (para reportería; útil en Rechazados).
+    updatedAt: request.updatedAt ? request.updatedAt.toISOString() : undefined,
+    // Agente CC que ingresó la solicitud.
+    createdByName: request.createdBy?.name ?? request.createdBy?.email ?? undefined,
     attachments:
       request.attachments?.map((a) => ({
         id: a.id,
@@ -160,7 +182,9 @@ export function prismaCobranzaTypeToUi(value: string): CobranzaDocumentType {
 export function cobranzaToUi(document: CobranzaWithItemsAndPayments): CobranzaMainDocument {
   return {
     id: document.id,
+    documentNumber: document.documentNumber,
     type: prismaCobranzaTypeToUi(document.type),
+    typeCode: document.typeCode || (document.type as string),
     date: toDateInput(document.date),
     country: document.country,
     clientId: document.clientId,

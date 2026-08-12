@@ -3,7 +3,8 @@
  */
 import { PrismaAdapter } from '@next-auth/prisma-adapter';
 import * as jose from 'jose';
-import type { NextAuthOptions } from 'next-auth';
+import { getServerSession } from 'next-auth';
+import type { NextAuthOptions, Session } from 'next-auth';
 import CredentialsProvider from 'next-auth/providers/credentials';
 import KeycloakProvider from 'next-auth/providers/keycloak';
 import { z } from 'zod';
@@ -177,3 +178,43 @@ export const authOptions: NextAuthOptions = {
   // Opt-in explícito para evitar logs verbosos de auth por defecto (incl. en dev).
   debug: process.env.NEXTAUTH_DEBUG === 'true',
 };
+
+
+/**
+ * Sesión efectiva para las rutas de API.
+ *
+ * - AUTH_ENABLED=true  -> sesión real de NextAuth (login normal).
+ * - AUTH_ENABLED!=true -> MODO DESARROLLO SIN LOGIN: devuelve una sesión de
+ *   sistema con el admin semilla (rol Administrador) para que las rutas tengan
+ *   un usuario válido (createdById) y permisos completos.
+ *
+ * IMPORTANTE: no usar AUTH_ENABLED=false en producción.
+ */
+export async function getAppSession(): Promise<Session | null> {
+  if (isAuthEnabled) {
+    return getServerSession(authOptions);
+  }
+  try {
+    await ensureSeedAdminUser();
+    // Tomamos un usuario real de la base (primer Administrador activo, o cualquier
+    // usuario activo) para no depender de que ADMIN_EMAIL coincida con un email
+    // existente.
+    const admin =
+      (await prisma.user.findFirst({ where: { role: 'Administrador', isActive: true } })) ??
+      (await prisma.user.findFirst({ where: { isActive: true } }));
+    if (!admin) return null;
+    return {
+      user: {
+        id: admin.id,
+        name: admin.name,
+        email: admin.email,
+        role: 'Administrador',
+        mustChangePassword: false,
+      },
+      roles: ['Administrador'],
+      expires: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
+    } as unknown as Session;
+  } catch {
+    return null;
+  }
+}

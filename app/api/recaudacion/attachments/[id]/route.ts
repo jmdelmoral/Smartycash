@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server';
 import { getServerSession } from 'next-auth';
 
-import { authOptions } from '@/lib/auth';
+import { authOptions, getAppSession } from '@/lib/auth';
 import { canRead, canWrite } from '@/lib/authz';
 import { fileStorage } from '@/lib/file-storage';
 import prisma from '@/lib/prisma';
@@ -10,7 +10,7 @@ type Ctx = { params: Promise<{ id: string }> };
 
 /** Sirve el binario del comprobante (inline) para visualizarlo/descargarlo. */
 export async function GET(_request: Request, { params }: Ctx) {
-  const session = await getServerSession(authOptions);
+  const session = await getAppSession();
   if (!session?.user?.email) {
     return NextResponse.json({ error: 'No autenticado' }, { status: 401 });
   }
@@ -43,7 +43,7 @@ export async function GET(_request: Request, { params }: Ctx) {
 
 /** Elimina un comprobante (metadatos + binario). */
 export async function DELETE(_request: Request, { params }: Ctx) {
-  const session = await getServerSession(authOptions);
+  const session = await getAppSession();
   if (!session?.user?.email) {
     return NextResponse.json({ error: 'No autenticado' }, { status: 401 });
   }

@@ -3,7 +3,7 @@ import { getServerSession } from 'next-auth';
 import { z } from 'zod';
 
 import { auditAction } from '@/lib/audit';
-import { authOptions } from '@/lib/auth';
+import { authOptions, getAppSession } from '@/lib/auth';
 import { canRead, canWrite } from '@/lib/authz';
 import { cobranzaToUi, cobranzaTypeToPrisma, parseDateInput } from '@/lib/business-mappers';
 import prisma from '@/lib/prisma';
@@ -15,6 +15,11 @@ const subDocumentSchema = z.object({
   detail: z.string().optional().default(''),
 });
 
+// D 4b-2 / Fase 5: el PUT YA NO crea/borra Payment. Los pagos son responsabilidad
+// EXCLUSIVA de los endpoints /api/cobranza/payments{,/reverse,/credit-note,/bulk}.
+// Seguimos aceptando `payments` en el payload (el cliente aún los trae en su estado)
+// pero se IGNORAN para persistencia: el pendiente/estado se derivan de los pagos
+// realmente persistidos en la base, nunca de lo que manda el cliente.
 const paymentSchema = z.object({
   movementId: z.string().min(1),
   amount: z.coerce.number().positive(),
@@ -24,7 +29,9 @@ const paymentSchema = z.object({
 
 const documentSchema = z.object({
   id: z.string().min(1),
+  documentNumber: z.string().trim().min(1),
   type: z.enum(['Factura', 'Nota de cobro', 'Nota de Crédito']),
+  typeCode: z.string().trim().optional().default(''),
   date: z.string().min(1),
   country: z.string().min(1),
   clientId: z.string().min(1),
@@ -32,7 +39,7 @@ const documentSchema = z.object({
   pendingAmount: z.coerce.number().min(0),
   status: z.enum(['Pendiente', 'Pagado', 'Parcial']),
   subDocuments: z.array(subDocumentSchema),
-  payments: z.array(paymentSchema),
+  payments: z.array(paymentSchema).optional().default([]),
 });
 
 const payloadSchema = z.object({
@@ -43,7 +50,7 @@ const payloadSchema = z.object({
 });
 
 export async function GET() {
-  const session = await getServerSession(authOptions);
+  const session = await getAppSession();
   if (!session?.user?.email) {
     return NextResponse.json({ error: 'No autenticado' }, { status: 401 });
   }
@@ -61,7 +68,7 @@ export async function GET() {
 }
 
 export async function PUT(request: Request) {
-  const session = await getServerSession(authOptions);
+  const session = await getAppSession();
   if (!session?.user?.email) {
     return NextResponse.json({ error: 'No autenticado' }, { status: 401 });
   }
@@ -86,21 +93,19 @@ export async function PUT(request: Request) {
   const reverseIdFilter = parsed.data.knownIds
     ? { in: parsed.data.knownIds.filter((id) => !payloadIdSet.has(id)) }
     : { notIn: documentIds.length > 0 ? documentIds : [''] };
-  // #3 Correctitud financiera: el servidor NO confía en el saldo/estado que
-  // envía el cliente. Valida cuadratura de PNR y sobrepago, y computa
-  // pendingAmount y status a partir de los pagos (tolerancia de medio centavo).
+
+  // #3 Correctitud financiera: el servidor NO confía en el saldo/estado que envía el
+  // cliente. Valida la cuadratura de PNR y deriva pendingAmount/status desde los pagos
+  // REALMENTE PERSISTIDOS en la base (tolerancia de medio centavo). El PUT ya no
+  // gestiona Payment; solo campos del documento + items/PNR.
   const round2 = (n: number) => Math.round(n * 100) / 100;
   const EPS = 0.005;
-  const derivedByDocId = new Map<
-    string,
-    { pendingAmount: number; status: 'Pendiente' | 'Parcial' | 'Pagado' }
-  >();
   for (const document of parsed.data.documents) {
     const total = round2(document.totalAmount);
     if (document.subDocuments.length > 0) {
       // Detalle PNR OPCIONAL e incremental: solo rechazamos si la suma EXCEDE el
-      // total del documento (sobre-detalle). Permitir carga parcial habilita
-      // cargar PNRs de a poco / por lotes sin que el guardado falle.
+      // total del documento (sobre-detalle). Permitir carga parcial habilita cargar
+      // PNRs de a poco / por lotes sin que el guardado falle.
       const itemsSum = round2(document.subDocuments.reduce((sum, item) => sum + item.amount, 0));
       if (itemsSum - total > EPS) {
         return NextResponse.json(
@@ -111,19 +116,6 @@ export async function PUT(request: Request) {
         );
       }
     }
-    const paymentsSum = round2(document.payments.reduce((sum, payment) => sum + payment.amount, 0));
-    if (paymentsSum - total > EPS) {
-      return NextResponse.json(
-        {
-          error: `Documento ${document.id}: los pagos (${paymentsSum}) superan el total (${total}).`,
-        },
-        { status: 400 }
-      );
-    }
-    const pendingAmount = Math.max(round2(total - paymentsSum), 0);
-    const status: 'Pendiente' | 'Parcial' | 'Pagado' =
-      pendingAmount <= EPS ? 'Pagado' : pendingAmount >= total - EPS ? 'Pendiente' : 'Parcial';
-    derivedByDocId.set(document.id, { pendingAmount, status });
   }
 
   const auditEvents: Array<{
@@ -134,195 +126,166 @@ export async function PUT(request: Request) {
     metadata?: unknown;
   }> = [];
 
-  await prisma.$transaction(async (tx) => {
-    const existingDocuments = await tx.cobranzaDocument.findMany({
-      where: { id: { in: documentIds.length > 0 ? documentIds : [''] } },
-      include: { payments: true, items: true },
-    });
-    const existingById = new Map(existingDocuments.map((document) => [document.id, document]));
-
-    const documentsToAnnul = await tx.cobranzaDocument.findMany({
-      where: {
-        id: reverseIdFilter,
-        status: { not: 'Anulado' },
-      },
-      select: { id: true, status: true },
-    });
-
-    await tx.cobranzaDocument.updateMany({
-      where: {
-        id: reverseIdFilter,
-        status: { not: 'Anulado' },
-      },
-      data: { status: 'Anulado' },
-    });
-
-    for (const annulled of documentsToAnnul) {
-      auditEvents.push({
-        action: 'document_annulled',
-        entityId: annulled.id,
-        before: { status: annulled.status },
-        after: { status: 'Anulado' },
+  try {
+    await prisma.$transaction(async (tx) => {
+      const existingDocuments = await tx.cobranzaDocument.findMany({
+        where: { id: { in: documentIds.length > 0 ? documentIds : [''] } },
+        include: { payments: true, items: true },
       });
-    }
+      const existingById = new Map(existingDocuments.map((document) => [document.id, document]));
 
-    for (const document of parsed.data.documents) {
-      const previous = existingById.get(document.id);
-      const derived = derivedByDocId.get(document.id)!;
-      await tx.cobranzaDocument.upsert({
-        where: { id: document.id },
-        update: {
-          documentNumber: document.id,
-          type: cobranzaTypeToPrisma(document.type),
-          date: parseDateInput(document.date),
-          country: document.country,
-          clientId: document.clientId,
-          totalAmount: document.totalAmount,
-          pendingAmount: derived.pendingAmount,
-          status: derived.status,
+      const documentsToAnnul = await tx.cobranzaDocument.findMany({
+        where: {
+          id: reverseIdFilter,
+          status: { not: 'Anulado' },
         },
-        create: {
-          id: document.id,
-          documentNumber: document.id,
-          type: cobranzaTypeToPrisma(document.type),
-          date: parseDateInput(document.date),
-          country: document.country,
-          clientId: document.clientId,
-          totalAmount: document.totalAmount,
-          pendingAmount: derived.pendingAmount,
-          status: derived.status,
-          createdById: session.user.id,
-        },
+        select: { id: true, status: true },
       });
 
-      if (!previous) {
+      await tx.cobranzaDocument.updateMany({
+        where: {
+          id: reverseIdFilter,
+          status: { not: 'Anulado' },
+        },
+        data: { status: 'Anulado' },
+      });
+
+      for (const annulled of documentsToAnnul) {
         auditEvents.push({
-          action: 'document_created',
-          entityId: document.id,
-          after: {
-            status: derived.status,
+          action: 'document_annulled',
+          entityId: annulled.id,
+          before: { status: annulled.status },
+          after: { status: 'Anulado' },
+        });
+      }
+
+      for (const document of parsed.data.documents) {
+        const previous = existingById.get(document.id);
+
+        // Pendiente/estado derivados de los pagos PERSISTIDOS (no de lo que manda el
+        // cliente). Documento nuevo => sin pagos => pendiente = total, Pendiente.
+        const total = round2(document.totalAmount);
+        const paidSum = round2(
+          (previous?.payments ?? [])
+            .filter((payment) => !payment.voidedAt)
+            .reduce((sum, payment) => sum + Number(payment.amount), 0)
+        );
+        const pendingAmount = Math.max(round2(total - paidSum), 0);
+        const derivedStatus: 'Pendiente' | 'Parcial' | 'Pagado' =
+          pendingAmount <= EPS ? 'Pagado' : pendingAmount >= total - EPS ? 'Pendiente' : 'Parcial';
+
+        await tx.cobranzaDocument.upsert({
+          where: { id: document.id },
+          update: {
+            documentNumber: document.documentNumber,
+            typeCode: document.typeCode || document.type,
+            type: cobranzaTypeToPrisma(document.type),
+            date: parseDateInput(document.date),
+            country: document.country,
+            clientId: document.clientId,
             totalAmount: document.totalAmount,
-            pendingAmount: derived.pendingAmount,
+            pendingAmount,
+            status: derivedStatus,
           },
-        });
-      } else if (previous.status !== derived.status) {
-        auditEvents.push({
-          action: 'document_status_changed',
-          entityId: document.id,
-          before: {
-            status: previous.status,
-            pendingAmount: previous.pendingAmount,
-          },
-          after: {
-            status: derived.status,
-            pendingAmount: derived.pendingAmount,
-          },
-        });
-      }
-
-      await tx.payment.deleteMany({ where: { documentId: document.id } });
-      await tx.cobranzaDocumentItem.deleteMany({ where: { documentId: document.id } });
-
-      for (const subDocument of document.subDocuments) {
-        const saleReference = await tx.saleReference.upsert({
-          where: { type_reference: { type: 'PNR', reference: subDocument.reference } },
-          update: { clientId: document.clientId },
-          create: { type: 'PNR', reference: subDocument.reference, clientId: document.clientId },
-        });
-
-        await tx.cobranzaDocumentItem.create({
-          data: {
-            id: subDocument.id,
-            documentId: document.id,
-            saleReferenceId: saleReference.id,
-            reference: subDocument.reference,
-            amount: subDocument.amount,
-            detail: subDocument.detail,
-          },
-        });
-      }
-
-      for (const payment of document.payments) {
-        const movement = await tx.cartolaMovement.findUnique({
-          where: { id: payment.movementId },
-        });
-        const creditNote = movement
-          ? null
-          : await tx.cobranzaDocument.findUnique({ where: { id: payment.movementId } });
-
-        await tx.payment.create({
-          data: {
-            documentId: document.id,
-            sourceType: movement ? 'BankMovement' : creditNote ? 'CreditNote' : 'ManualAdjustment',
-            movementId: movement?.id,
-            creditNoteDocumentId: creditNote?.id,
-            amount: payment.amount,
-            date: parseDateInput(payment.date),
-            bank: payment.bank,
+          create: {
+            id: document.id,
+            documentNumber: document.documentNumber,
+            typeCode: document.typeCode || document.type,
+            type: cobranzaTypeToPrisma(document.type),
+            date: parseDateInput(document.date),
+            country: document.country,
+            clientId: document.clientId,
+            totalAmount: document.totalAmount,
+            pendingAmount,
+            status: derivedStatus,
             createdById: session.user.id,
           },
         });
+
+        if (!previous) {
+          auditEvents.push({
+            action: 'document_created',
+            entityId: document.id,
+            after: {
+              status: derivedStatus,
+              totalAmount: document.totalAmount,
+              pendingAmount,
+            },
+          });
+        } else if (previous.status !== derivedStatus) {
+          auditEvents.push({
+            action: 'document_status_changed',
+            entityId: document.id,
+            before: {
+              status: previous.status,
+              pendingAmount: previous.pendingAmount,
+            },
+            after: {
+              status: derivedStatus,
+              pendingAmount,
+            },
+          });
+        }
+
+        // Items/PNR: siguen gestionándose por el PUT (no son pagos).
+        await tx.cobranzaDocumentItem.deleteMany({ where: { documentId: document.id } });
+
+        for (const subDocument of document.subDocuments) {
+          const saleReference = await tx.saleReference.upsert({
+            where: { type_reference: { type: 'PNR', reference: subDocument.reference } },
+            update: { clientId: document.clientId },
+            create: { type: 'PNR', reference: subDocument.reference, clientId: document.clientId },
+          });
+
+          await tx.cobranzaDocumentItem.create({
+            data: {
+              id: subDocument.id,
+              documentId: document.id,
+              saleReferenceId: saleReference.id,
+              reference: subDocument.reference,
+              amount: subDocument.amount,
+              detail: subDocument.detail,
+            },
+          });
+        }
       }
 
-      const previousPaymentKeys =
-        previous?.payments
-          .map((payment) =>
-            [
-              payment.movementId ?? payment.creditNoteDocumentId ?? '',
-              payment.amount.toString(),
-              payment.date.toISOString().slice(0, 10),
-            ].join(':')
-          )
-          .sort() ?? [];
-      const nextPaymentKeys = document.payments
-        .map((payment) =>
-          [
-            payment.movementId,
-            payment.amount.toString(),
-            parseDateInput(payment.date).toISOString().slice(0, 10),
-          ].join(':')
-        )
-        .sort();
-
-      if (JSON.stringify(previousPaymentKeys) !== JSON.stringify(nextPaymentKeys)) {
-        auditEvents.push({
-          action: 'document_payments_changed',
-          entityId: document.id,
-          before: { payments: previousPaymentKeys },
-          after: { payments: nextPaymentKeys },
-        });
+      for (const event of auditEvents) {
+        await auditAction(
+          {
+            actorId: session.user.id,
+            action: event.action,
+            module: 'Cobranza',
+            entityType: 'CobranzaDocument',
+            entityId: event.entityId,
+            before: event.before,
+            after: event.after,
+            metadata: event.metadata,
+            request,
+          },
+          tx
+        );
       }
-    }
-    for (const event of auditEvents) {
+
       await auditAction(
         {
           actorId: session.user.id,
-          action: event.action,
+          action: 'bulk_sync',
           module: 'Cobranza',
           entityType: 'CobranzaDocument',
-          entityId: event.entityId,
-          before: event.before,
-          after: event.after,
-          metadata: event.metadata,
+          entityId: 'snapshot',
+          metadata: { count: parsed.data.documents.length },
           request,
         },
         tx
       );
-    }
-
-    await auditAction(
-      {
-        actorId: session.user.id,
-        action: 'bulk_sync',
-        module: 'Cobranza',
-        entityType: 'CobranzaDocument',
-        entityId: 'snapshot',
-        metadata: { count: parsed.data.documents.length },
-        request,
-      },
-      tx
+    });
+  } catch (err) {
+    return NextResponse.json(
+      { error: 'Error al guardar Cobranza', detail: String((err as Error)?.message ?? err) },
+      { status: 500 }
     );
-  });
+  }
 
   return NextResponse.json({ ok: true });
 }

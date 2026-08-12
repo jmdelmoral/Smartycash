@@ -3,7 +3,7 @@ import { getServerSession } from 'next-auth';
 import { z } from 'zod';
 
 import { auditAction } from '@/lib/audit';
-import { authOptions } from '@/lib/auth';
+import { authOptions, getAppSession } from '@/lib/auth';
 import { canRead, canWrite } from '@/lib/authz';
 import { buildMovementWhere, parsePagination } from '@/lib/cartola-filters';
 import { Prisma } from '@/lib/generated/prisma';
@@ -44,6 +44,9 @@ const movementSchema = z.object({
   ]),
   mainIdentificationId: z.string().optional().default(''),
   documents: z.array(documentSchema),
+  // Identificación como Adquiriente: adquiriente + canal de venta.
+  adquirienteId: z.string().nullable().optional(),
+  salesChannel: z.enum(['GDS', 'VentaAeropuerto', 'VentaWeb']).nullable().optional(),
 });
 
 const payloadSchema = z.object({
@@ -54,7 +57,7 @@ const payloadSchema = z.object({
 });
 
 export async function GET(request: Request) {
-  const session = await getServerSession(authOptions);
+  const session = await getAppSession();
   if (!session?.user?.email) {
     return NextResponse.json({ error: 'No autenticado' }, { status: 401 });
   }
@@ -66,14 +69,34 @@ export async function GET(request: Request) {
   const where = buildMovementWhere(searchParams);
   const { paginate, page, pageSize } = parsePagination(searchParams);
 
+  // Ordenamiento server-side (respeta la paginación). Whitelist de campos.
+  const SORT_FIELDS: Record<string, keyof Prisma.CartolaMovementOrderByWithRelationInput> = {
+    date: 'date',
+    amount: 'amount',
+    bank: 'bank',
+    tipo: 'identificationType',
+    descripcion: 'description',
+  };
+  const sortParam = searchParams.get('sortBy') ?? '';
+  const sortDir: 'asc' | 'desc' = searchParams.get('sortDir') === 'asc' ? 'asc' : 'desc';
+  const sortField = SORT_FIELDS[sortParam];
+  const orderBy: Prisma.CartolaMovementOrderByWithRelationInput[] = sortField
+    ? [{ [sortField]: sortDir }, { createdAt: 'desc' }]
+    : [{ date: 'desc' }, { createdAt: 'desc' }];
+
   // Backward compatible: with no `pageSize` param we return the full filtered
   // set (legacy behaviour). With `pageSize` we paginate and also report `total`.
-  const [total, rows] = await prisma.$transaction([
+  const [total, unidentifiedTotal, rows] = await prisma.$transaction([
     prisma.cartolaMovement.count({ where }),
+    // D 3a: conteo de "Sin identificar" dentro del filtro, para el indicador
+    // (la vista paginada ya no puede calcularlo sobre el array completo).
+    prisma.cartolaMovement.count({
+      where: { AND: [where, { identificationType: 'SinIdentificar' }] },
+    }),
     prisma.cartolaMovement.findMany({
       where,
       include: { allocations: { include: { saleReference: true } } },
-      orderBy: [{ date: 'desc' }, { createdAt: 'desc' }],
+      orderBy,
       ...(paginate && pageSize ? { skip: (page - 1) * pageSize, take: pageSize } : {}),
     }),
   ]);
@@ -81,13 +104,14 @@ export async function GET(request: Request) {
   return NextResponse.json({
     movements: rows.map(cartolaToUi),
     total,
+    unidentifiedTotal,
     page: paginate ? page : 1,
     pageSize: paginate && pageSize ? pageSize : total,
   });
 }
 
 export async function PUT(request: Request) {
-  const session = await getServerSession(authOptions);
+  const session = await getAppSession();
   if (!session?.user?.email) {
     return NextResponse.json({ error: 'No autenticado' }, { status: 401 });
   }
@@ -167,6 +191,11 @@ export async function PUT(request: Request) {
       const previous = existingById.get(movement.movementId);
       const nextStatus = movementStatusFromDocuments(movement);
       const nextIdentificationType = uiIdentificationToPrisma(movement.mainIdentification);
+      // Adquiriente + canal solo aplican cuando el tipo es Adquiriente; en cualquier
+      // otro caso se limpian para no dejar datos colgados.
+      const isAdq = nextIdentificationType === 'Adquiriente';
+      const nextAdquirienteId = isAdq ? movement.adquirienteId ?? null : null;
+      const nextSalesChannel = isAdq ? movement.salesChannel ?? null : null;
       const bankAccount = await tx.bankAccount.findFirst({
         where: {
           accountNumber: movement.bankAccount,
@@ -190,6 +219,8 @@ export async function PUT(request: Request) {
           description: movement.description,
           extraFields: movement.extraFields,
           identificationType: nextIdentificationType,
+          adquirienteId: nextAdquirienteId,
+          salesChannel: nextSalesChannel,
           status: nextStatus,
           ownerUserId: session.user.id,
         },
@@ -205,6 +236,8 @@ export async function PUT(request: Request) {
           description: movement.description,
           extraFields: movement.extraFields,
           identificationType: nextIdentificationType,
+          adquirienteId: nextAdquirienteId,
+          salesChannel: nextSalesChannel,
           status: nextStatus,
           ownerUserId: session.user.id,
         },
@@ -328,7 +361,7 @@ const createPayloadSchema = z.object({
  * full dataset in memory.
  */
 export async function POST(request: Request) {
-  const session = await getServerSession(authOptions);
+  const session = await getAppSession();
   if (!session?.user?.email) {
     return NextResponse.json({ error: 'No autenticado' }, { status: 401 });
   }
@@ -426,7 +459,7 @@ const deletePayloadSchema = z.object({
  * the old bulk PUT with an explicit, non-destructive operation.
  */
 export async function DELETE(request: Request) {
-  const session = await getServerSession(authOptions);
+  const session = await getAppSession();
   if (!session?.user?.email) {
     return NextResponse.json({ error: 'No autenticado' }, { status: 401 });
   }
@@ -437,6 +470,23 @@ export async function DELETE(request: Request) {
   const parsed = deletePayloadSchema.safeParse(await request.json());
   if (!parsed.success) {
     return NextResponse.json({ error: 'Datos invalidos' }, { status: 400 });
+  }
+
+  // Gate de cierre contable: un movimiento CerradoDefinitivo solo puede
+  // reversarse/anularse por Contabilidad o Administrador.
+  if (!canRead(session, 'Contabilidad')) {
+    const closed = await prisma.cartolaMovement.findFirst({
+      where: { id: { in: parsed.data.movementIds }, closeState: 'CerradoDefinitivo' },
+      select: { displayId: true, id: true },
+    });
+    if (closed) {
+      return NextResponse.json(
+        {
+          error: `El movimiento ${closed.displayId ?? closed.id} está CERRADO contablemente. Solo Contabilidad puede reversarlo.`,
+        },
+        { status: 403 }
+      );
+    }
   }
 
   await prisma.$transaction(async (tx) => {

@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server';
 import { getServerSession } from 'next-auth';
 
-import { authOptions } from '@/lib/auth';
+import { authOptions, getAppSession } from '@/lib/auth';
 import { canRead } from '@/lib/authz';
 import prisma from '@/lib/prisma';
 
@@ -10,7 +10,7 @@ import prisma from '@/lib/prisma';
  * (no reversados y no CerradoDefinitivo), con su periodo de origen.
  */
 export async function GET() {
-  const session = await getServerSession(authOptions);
+  const session = await getAppSession();
   if (!session?.user?.email) {
     return NextResponse.json({ error: 'No autenticado' }, { status: 401 });
   }

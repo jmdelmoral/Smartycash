@@ -1,10 +1,10 @@
 import { NextResponse } from 'next/server';
 import { getServerSession } from 'next-auth';
 
-import { authOptions } from '@/lib/auth';
+import { authOptions, getAppSession } from '@/lib/auth';
 
 export async function GET() {
-  const session = await getServerSession(authOptions);
+  const session = await getAppSession();
 
   if (!session?.id_token) {
     return NextResponse.json({ error: 'No session found' }, { status: 401 });

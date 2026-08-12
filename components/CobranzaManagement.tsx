@@ -5,6 +5,7 @@ import * as XLSX from 'xlsx';
 
 import { Badge } from '@/components/ui/badge';
 import { formatDate } from '@/lib/format';
+import { docLabel, getDocType } from '@/lib/document-types';
 import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
 import {
@@ -16,6 +17,7 @@ import {
   DialogFooter,
 } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
+import { TableLoadingRow } from '@/components/ui/loading-row';
 import {
   BankAccount,
   CartolaMovement,
@@ -34,6 +36,8 @@ interface CobranzaManagementProps {
   setMovements: React.Dispatch<React.SetStateAction<CartolaMovement[]>>;
   cobranzaDocs: CobranzaMainDocument[];
   setCobranzaDocs: React.Dispatch<React.SetStateAction<CobranzaMainDocument[]>>;
+  /** Carga inicial de datos maestros en curso (para mostrar indicador). */
+  loading?: boolean;
 }
 
 export function CobranzaManagement({
@@ -43,6 +47,7 @@ export function CobranzaManagement({
   setMovements,
   cobranzaDocs,
   setCobranzaDocs,
+  loading = false,
 }: CobranzaManagementProps) {
   const [clientFilter, setClientFilter] = useState('all');
   const [statusFilter, setStatusFilter] = useState('all');
@@ -58,6 +63,11 @@ export function CobranzaManagement({
   const [selectedDocId, setSelectedDocId] = useState<string | null>(null);
   const [viewingSubDocs, setViewingSubDocs] = useState<CartolaDocument[]>([]);
   const [paymentMovId, setPaymentMovId] = useState('');
+  // D 4b-1: fuentes de pago (abonos con saldo) traídas del servidor, sin depender
+  // del array compartido de movimientos.
+  const [bankSources, setBankSources] = useState<(CartolaMovement & { availableAmount: number })[]>(
+    []
+  );
   const [isPayDetailModalOpen, setIsPayDetailModalOpen] = useState(false);
   const [selectedDocForDetails, setSelectedDocForDetails] = useState<CobranzaMainDocument | null>(
     null
@@ -68,6 +78,12 @@ export function CobranzaManagement({
   const [newDetailRef, setNewDetailRef] = useState('');
   const [newDetailAmount, setNewDetailAmount] = useState('');
   const [addDetailError, setAddDetailError] = useState<string | null>(null);
+
+  // Edición acotada de documento (solo sin pagos): fecha + monto total.
+  const [editDoc, setEditDoc] = useState<CobranzaMainDocument | null>(null);
+  const [editDate, setEditDate] = useState('');
+  const [editTotal, setEditTotal] = useState('');
+  const [editDocError, setEditDocError] = useState<string | null>(null);
 
   // Documento seleccionado para ver detalles/pagos
   const currentViewingDoc = useMemo(() => {
@@ -172,13 +188,13 @@ export function CobranzaManagement({
       'Tipo',
       'DocumentoID',
       'Fecha',
-      'Pais',
       'ClienteID',
       'PNR',
       'MontoPNR',
       'MontoTotal',
     ].join(';');
-    const sample = 'Factura;FAC-1001;21/05/2024;Chile;CLI-1;ABC123;50000;50000';
+    // El País se toma del cliente (no se pide aquí).
+    const sample = '33;FAC-1001;21/05/2024;CLI-1;ABC123;50000;50000'; // Tipo = código (33/34/61/NC)
     const blob = new Blob(['\uFEFF' + `${headers}\n${sample}\n`], { type: 'text/csv;charset=utf-8;' });
     const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
@@ -197,110 +213,124 @@ export function CobranzaManagement({
       const workbook = XLSX.read(data);
       const rows = XLSX.utils.sheet_to_json<any>(workbook.Sheets[workbook.SheetNames[0]]);
 
+      // Identidad = País(del cliente) + Tipo + Número. País se deriva del cliente.
+      // El id interno es compuesto para que un mismo número conviva entre tipos/países.
       const existingIds = new Set(cobranzaDocs.map((d) => d.id.toLowerCase()));
-      const fileIds = new Set<string>();
+      const seenIds = new Set<string>();
       let skippedCount = 0;
 
-      // Estructura: Tipo, DocumentoID, Fecha, Pais, ClienteID, PNR, MontoPNR, MontoTotal
+      // Estructura: Tipo, DocumentoID, Fecha, ClienteID, PNR, MontoPNR, MontoTotal
+      // (el País ya NO se pide: se toma del cliente). Agrupamos por Tipo+Número+Cliente.
       const groups = rows.reduce((acc: any, row: any) => {
-        const key = String(row.DocumentoID);
+        const key = `${String(row.Tipo ?? '').trim()}||${String(row.DocumentoID ?? '').trim()}||${String(row.ClienteID ?? '').trim()}`;
         if (!acc[key]) acc[key] = [];
         acc[key].push(row);
         return acc;
       }, {});
 
-      const newDocs: CobranzaMainDocument[] = Object.keys(groups)
-        .filter((docId) => {
-          const normalizedId = docId.toLowerCase();
-          // Validar contra sistema y contra duplicados en el mismo archivo
-          if (existingIds.has(normalizedId) || fileIds.has(normalizedId)) {
-            skippedCount++;
-            return false;
-          }
-          fileIds.add(normalizedId);
-          return true;
-        })
-        .map((docId) => {
-          const group = groups[docId];
-          const first = group[0];
+      const newDocs: CobranzaMainDocument[] = [];
+      for (const key of Object.keys(groups)) {
+        const group = groups[key];
+        const first = group[0];
 
-          const tipo = String(first.Tipo ?? '').trim();
-          if (!['Factura', 'Nota de cobro', 'Nota de Crédito'].includes(tipo)) {
-            throw new Error(
-              `Documento ${docId}: Tipo inválido "${tipo}". Use Factura, Nota de cobro o Nota de Crédito.`
-            );
-          }
+        const numero = String(first.DocumentoID ?? '').trim();
+        if (!numero) throw new Error('Hay una fila sin DocumentoID.');
 
-          const totalAmount = Number(first.MontoTotal);
-          if (!Number.isFinite(totalAmount) || totalAmount <= 0) {
-            throw new Error(`Documento ${docId}: MontoTotal inválido.`);
-          }
+        const codigo = String(first.Tipo ?? '').trim();
+        if (!codigo) throw new Error(`Documento ${numero}: falta el Tipo (código).`);
 
-          // ClienteID puede venir como código App, Navitaire, BP SAP, RUT o id
-          // interno. Match flexible (case-insensitive) y guardamos SIEMPRE el id
-          // interno resuelto (no el valor crudo de la planilla).
-          const clienteRaw = String(first.ClienteID ?? '').trim();
-          const clienteKey = clienteRaw.toUpperCase();
-          const matchedClient = clients.find((c) =>
-            [c.appCode, c.navitaireCode, c.sapBP, c.taxId, c.id]
-              .filter((v): v is string => !!v)
-              .some((v) => v.trim().toUpperCase() === clienteKey)
+        const totalAmount = Number(first.MontoTotal);
+        if (!Number.isFinite(totalAmount) || totalAmount <= 0) {
+          throw new Error(`Documento ${numero}: MontoTotal inválido.`);
+        }
+
+        // ClienteID: código App/Navitaire/BP SAP/RUT o id interno. Match flexible.
+        const clienteRaw = String(first.ClienteID ?? '').trim();
+        const clienteKey = clienteRaw.toUpperCase();
+        const matchedClient = clients.find((c) =>
+          [c.appCode, c.navitaireCode, c.sapBP, c.taxId, c.id]
+            .filter((v): v is string => !!v)
+            .some((v) => v.trim().toUpperCase() === clienteKey)
+        );
+        if (!matchedClient) {
+          throw new Error(
+            `Documento ${numero}: ClienteID "${clienteRaw}" no corresponde a ningún cliente registrado (App/Navitaire/BP SAP/RUT).`
           );
-          if (!matchedClient) {
+        }
+        const clientId = matchedClient.id;
+        const pais = matchedClient.country || 'Chile'; // país derivado del cliente
+
+        // El Tipo de la planilla es el CÓDIGO; validamos contra la config del país
+        // y derivamos la categoría (Factura/Nota de cobro/Nota de Crédito).
+        const def = getDocType(pais, codigo);
+        if (!def) {
+          throw new Error(
+            `Documento ${numero}: código de tipo "${codigo}" no configurado para ${pais}.`
+          );
+        }
+        const categoria = def.category;
+
+        // Identidad compuesta + dedup por (país+código+número).
+        const compositeId = `${pais}::${codigo}::${numero}`;
+        const normId = compositeId.toLowerCase();
+        if (existingIds.has(normId) || seenIds.has(normId)) {
+          skippedCount++;
+          continue;
+        }
+        seenIds.add(normId);
+
+        // Fecha: acepta dd/mm/yyyy (o yyyy-mm-dd) y normaliza a ISO.
+        const rawFecha = String(first.Fecha ?? '').trim();
+        const ymd = /^(\d{4})-(\d{2})-(\d{2})$/.exec(rawFecha);
+        const dmy = /^(\d{2})[/-](\d{2})[/-](\d{4})$/.exec(rawFecha);
+        let isoDate: string;
+        if (ymd) isoDate = `${ymd[1]}-${ymd[2]}-${ymd[3]}`;
+        else if (dmy) isoDate = `${dmy[3]}-${dmy[2]}-${dmy[1]}`;
+        else throw new Error(`Documento ${numero}: fecha inválida (usa dd/mm/yyyy).`);
+
+        // Detalle (PNR) OPCIONAL. Si se incluye, cada PNR válido y no debe exceder el total.
+        const subDocuments = group
+          .filter((r: any) => r.PNR && String(r.PNR).toLowerCase() !== 'undefined')
+          .map((r: any) => {
+            const amt = Number(r.MontoPNR);
+            if (!Number.isFinite(amt) || amt <= 0) {
+              throw new Error(`Documento ${numero}: MontoPNR inválido para PNR ${r.PNR}.`);
+            }
+            return {
+              id: `SUB-${Math.random()}`,
+              reference: String(r.PNR).toUpperCase(),
+              amount: amt,
+              detail: 'Carga Masiva Cobranza',
+            };
+          });
+
+        if (subDocuments.length > 0) {
+          const round2 = (n: number) => Math.round(n * 100) / 100;
+          const pnrSum = round2(
+            subDocuments.reduce((acc: number, sd: { amount: number }) => acc + sd.amount, 0)
+          );
+          if (pnrSum - round2(totalAmount) > 0.01) {
             throw new Error(
-              `Documento ${docId}: ClienteID "${clienteRaw}" no corresponde a ningún cliente registrado (App/Navitaire/BP SAP/RUT).`
+              `Documento ${numero}: la suma de PNR (${pnrSum}) excede el total (${round2(totalAmount)}).`
             );
           }
-          const clientId = matchedClient.id;
+        }
 
-          // Fecha: acepta dd/mm/yyyy (o yyyy-mm-dd) y normaliza a ISO.
-          const rawFecha = String(first.Fecha ?? '').trim();
-          const ymd = /^(\d{4})-(\d{2})-(\d{2})$/.exec(rawFecha);
-          const dmy = /^(\d{2})[/-](\d{2})[/-](\d{4})$/.exec(rawFecha);
-          let isoDate: string;
-          if (ymd) isoDate = `${ymd[1]}-${ymd[2]}-${ymd[3]}`;
-          else if (dmy) isoDate = `${dmy[3]}-${dmy[2]}-${dmy[1]}`;
-          else throw new Error(`Documento ${docId}: fecha inválida (usa dd/mm/yyyy).`);
-
-          // Detalle (PNR) OPCIONAL. Si se incluye, cada PNR debe ser válido y sumar el total.
-          const subDocuments = group
-            .filter((r: any) => r.PNR && String(r.PNR).toLowerCase() !== 'undefined')
-            .map((r: any) => {
-              const amt = Number(r.MontoPNR);
-              if (!Number.isFinite(amt) || amt <= 0) {
-                throw new Error(`Documento ${docId}: MontoPNR inválido para PNR ${r.PNR}.`);
-              }
-              return {
-                id: `SUB-${Math.random()}`,
-                reference: String(r.PNR).toUpperCase(),
-                amount: amt,
-                detail: 'Carga Masiva Cobranza',
-              };
-            });
-
-          if (subDocuments.length > 0) {
-            const round2 = (n: number) => Math.round(n * 100) / 100;
-            const pnrSum = round2(subDocuments.reduce((acc: number, sd: { amount: number }) => acc + sd.amount, 0));
-            if (Math.abs(pnrSum - round2(totalAmount)) > 0.01) {
-              throw new Error(
-                `Documento ${docId}: la suma de PNR (${pnrSum}) no cuadra con el total (${round2(totalAmount)}).`
-              );
-            }
-          }
-
-          return {
-            id: String(docId),
-            type: tipo as CobranzaDocumentType,
-            date: isoDate,
-            country: String(first.Pais),
-            clientId,
-            totalAmount,
-            pendingAmount: totalAmount,
-            status: 'Pendiente',
-            payments: [],
-            subDocuments,
-          };
+        newDocs.push({
+          id: compositeId,
+          documentNumber: numero,
+          type: categoria as CobranzaDocumentType,
+          typeCode: codigo,
+          date: isoDate,
+          country: pais,
+          clientId,
+          totalAmount,
+          pendingAmount: totalAmount,
+          status: 'Pendiente',
+          payments: [],
+          subDocuments,
         });
+      }
 
       setCobranzaDocs((prev) => [...newDocs, ...prev]);
       if (skippedCount > 0) {
@@ -314,6 +344,19 @@ export function CobranzaManagement({
       alert(`Error en el formato del archivo: ${err.message || 'Verifique la estructura.'}`);
     } finally {
       event.target.value = ''; // Clear file input
+    }
+  };
+
+  const loadBankSources = async () => {
+    try {
+      const res = await fetch('/api/cartola/movements/payment-sources', { cache: 'no-store' });
+      if (!res.ok) return;
+      const data = (await res.json()) as {
+        sources?: (CartolaMovement & { availableAmount: number })[];
+      };
+      setBankSources(data.sources ?? []);
+    } catch {
+      // silencioso: si falla, el selector queda vacío y se puede reintentar
     }
   };
 
@@ -345,11 +388,10 @@ export function CobranzaManagement({
     }
 
     if (paymentSourceType === 'bank') {
-      const movement = movements.find((m) => m.movementId === paymentMovId);
-      if (!movement) return;
-
-      const usedAmount = movement.documents.reduce((sum, d) => sum + d.amount, 0);
-      const availableInBank = movement.amount - usedAmount;
+      // D 4b-1: la fuente y su saldo disponible vienen del endpoint (bankSources).
+      const source = bankSources.find((m) => m.movementId === paymentMovId);
+      if (!source) return;
+      const availableInBank = source.availableAmount;
 
       if (amountToApply > availableInBank + 0.01) {
         alert(
@@ -375,10 +417,10 @@ export function CobranzaManagement({
                 payments: [
                   ...doc.payments,
                   {
-                    movementId: movement.movementId,
+                    movementId: source.movementId,
                     amount: amountToApply,
-                    date: movement.date,
-                    bank: movement.bank,
+                    date: source.date,
+                    bank: source.bank,
                   },
                 ],
               }
@@ -394,7 +436,7 @@ export function CobranzaManagement({
               ...m.documents,
               {
                 id: `DOC-MANUAL-${Date.now()}`,
-                reference: targetDoc.id,
+                reference: targetDoc.documentNumber,
                 amount: amountToApply,
                 detail: 'Asociación Manual',
               },
@@ -427,7 +469,12 @@ export function CobranzaManagement({
               status: n <= 0.01 ? 'Pagado' : ('Parcial' as any),
               payments: [
                 ...doc.payments,
-                { movementId: nc.id, amount: amountToApply, date: nc.date, bank: 'Aplicación NC' },
+                {
+                  movementId: nc.documentNumber,
+                  amount: amountToApply,
+                  date: nc.date,
+                  bank: 'Aplicación NC',
+                },
               ],
             };
           }
@@ -444,6 +491,157 @@ export function CobranzaManagement({
     setPaymentMovId('');
     setPaymentAmount('');
     alert('Pago asociado exitosamente.');
+  };
+
+  // Reversar un pago aplicado: devuelve el saldo al documento y libera la fuente
+  // (movimiento bancario -> se le quita el consumo; Nota de Crédito -> se le
+  // restituye saldo). Permitido mientras el documento no esté anulado.
+  const onReversePayment = (
+    doc: CobranzaMainDocument,
+    payment: { movementId: string; amount: number; date: string; bank: string }
+  ) => {
+    if (
+      !window.confirm(
+        `¿Reversar el pago de $${payment.amount.toLocaleString()} (${payment.bank}) del documento ${doc.documentNumber}?`
+      )
+    ) {
+      return;
+    }
+    const round2 = (n: number) => Math.round(n * 100) / 100;
+    const isNc = payment.bank === 'Aplicación NC';
+
+    // Gate de cierre contable: si el pago vino de un movimiento CerradoDefinitivo,
+    // solo Contabilidad/Admin puede reversarlo.
+    const canTouchClosed = userRole === 'Administrador' || userRole === 'Contabilidad';
+    if (!isNc) {
+      const mov = movements.find((m) => m.movementId === payment.movementId);
+      if (mov?.closeState === 'CerradoDefinitivo' && !canTouchClosed) {
+        alert('El movimiento está CERRADO contablemente. Solo Contabilidad puede reversarlo.');
+        return;
+      }
+    }
+
+    setCobranzaDocs((prev) =>
+      prev.map((d) => {
+        // 1) Documento objetivo: quitar el pago y recomputar saldo/estado.
+        if (d.id === doc.id) {
+          let removed = false;
+          const payments = d.payments.filter((p) => {
+            if (
+              !removed &&
+              p.movementId === payment.movementId &&
+              round2(p.amount) === round2(payment.amount) &&
+              p.date === payment.date
+            ) {
+              removed = true;
+              return false;
+            }
+            return true;
+          });
+          const paid = payments.reduce((s, p) => s + p.amount, 0);
+          const pending = Math.max(round2(d.totalAmount - paid), 0);
+          const status: CobranzaStatus =
+            pending <= 0.01 ? 'Pagado' : pending >= d.totalAmount - 0.01 ? 'Pendiente' : 'Parcial';
+          return { ...d, payments, pendingAmount: pending, status };
+        }
+        // 2) Si la fuente era una Nota de Crédito, restituirle el saldo.
+        if (isNc && d.type === 'Nota de Crédito' && d.documentNumber === payment.movementId) {
+          const restored = round2(d.pendingAmount + payment.amount);
+          const status: CobranzaStatus =
+            restored >= d.totalAmount - 0.01 ? 'Pendiente' : restored <= 0.01 ? 'Pagado' : 'Parcial';
+          return { ...d, pendingAmount: restored, status };
+        }
+        return d;
+      })
+    );
+
+    // 3) Si la fuente era un movimiento bancario, liberar su consumo en Cartola.
+    if (!isNc && typeof setMovements === 'function') {
+      setMovements((prev) =>
+        prev.map((m) => {
+          if (m.movementId !== payment.movementId) return m;
+          const docs = [...m.documents];
+          const idx = docs.findIndex(
+            (x) => x.reference === doc.documentNumber && round2(x.amount) === round2(payment.amount)
+          );
+          if (idx >= 0) docs.splice(idx, 1);
+          const stillUsed = docs.length > 0;
+          return {
+            ...m,
+            documents: docs,
+            mainIdentification: stillUsed ? 'Cobranza crédito' : 'Sin identificar',
+            mainIdentificationId: stillUsed ? 'IDN-CC' : 'IDN-SIN-ID',
+          };
+        })
+      );
+    }
+
+    setIsPayDetailModalOpen(false);
+    alert('Pago reversado. Se devolvió el saldo al documento y se liberó la fuente.');
+  };
+
+  // Abrir edición acotada (solo documentos sin pagos).
+  const openEditDoc = (d: CobranzaMainDocument) => {
+    setEditDocError(null);
+    setEditDoc(d);
+    setEditDate(d.date);
+    setEditTotal(String(d.totalAmount));
+  };
+
+  const onSaveDocEdit = () => {
+    if (!editDoc) return;
+    setEditDocError(null);
+    const total = Number(editTotal);
+    if (!Number.isFinite(total) || total <= 0) {
+      setEditDocError('El monto total debe ser un número positivo.');
+      return;
+    }
+    const round2 = (n: number) => Math.round(n * 100) / 100;
+    const pnrSum = round2(editDoc.subDocuments.reduce((s2, x) => s2 + x.amount, 0));
+    if (pnrSum > 0 && round2(total) < pnrSum - 0.01) {
+      setEditDocError(
+        `El total ($${round2(total).toLocaleString()}) no puede ser menor que la suma de PNRs ya cargados ($${pnrSum.toLocaleString()}).`
+      );
+      return;
+    }
+    if (!editDate) {
+      setEditDocError('Indica la fecha.');
+      return;
+    }
+    setCobranzaDocs((prev) =>
+      prev.map((d) =>
+        d.id === editDoc.id
+          ? {
+              ...d,
+              date: editDate,
+              totalAmount: round2(total),
+              // Sin pagos: el pendiente es el total y el estado vuelve a Pendiente.
+              pendingAmount: round2(total),
+              status: 'Pendiente',
+            }
+          : d
+      )
+    );
+    setEditDoc(null);
+    alert('Documento actualizado.');
+  };
+
+  // Anular un documento de cobranza (soft-delete vía sync). Requiere que no tenga
+  // pagos asociados (reversa los pagos primero, para no dejar movimientos colgados).
+  const onAnnulDocument = (doc: CobranzaMainDocument) => {
+    if (doc.payments.length > 0) {
+      alert('Este documento tiene pagos asociados. Reversa los pagos antes de anularlo.');
+      return;
+    }
+    if (
+      !window.confirm(
+        `¿Anular el documento ${doc.documentNumber} (${doc.type})? Quedará anulado y saldrá del listado.`
+      )
+    ) {
+      return;
+    }
+    setCobranzaDocs((prev) => prev.filter((d) => d.id !== doc.id));
+    alert('Documento anulado.');
   };
 
   const generateEdoCuenta = () => {
@@ -642,8 +840,9 @@ export function CobranzaManagement({
   // Plantilla y carga masiva GENERAL de detalles PNR para VARIAS facturas.
   // Columnas: DocumentoID, PNR, MontoPNR (agrupa por DocumentoID).
   const onDownloadPnrDetailsTemplate = () => {
-    const headers = ['DocumentoID', 'PNR', 'MontoPNR'].join(',');
-    const sample = 'FAC-1001,ABC123,3000\nFAC-1001,DEF456,2000\n40004,GHI789,10000';
+    const headers = ['DocumentoID', 'Tipo', 'PNR', 'MontoPNR'].join(',');
+    const sample =
+      'FAC-1001,33,ABC123,3000\nFAC-1001,33,DEF456,2000\n40004,NC,GHI789,10000'; // Tipo = código
     const blob = new Blob([`${headers}\n${sample}\n`], { type: 'text/csv;charset=utf-8;' });
     const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
@@ -664,41 +863,45 @@ export function CobranzaManagement({
       const rows = XLSX.utils.sheet_to_json<any>(workbook.Sheets[workbook.SheetNames[0]]);
       if (rows.length === 0) throw new Error('El archivo no tiene filas.');
 
-      // Agrupar PNRs por DocumentoID.
+      // Agrupar PNRs por Tipo + Número (el documento se identifica así, no solo por número).
       const byDoc = new Map<string, { reference: string; amount: number }[]>();
       for (const r of rows) {
-        const docId = String(r.DocumentoID ?? '').trim();
-        if (!docId) throw new Error('Hay una fila sin DocumentoID.');
+        const numero = String(r.DocumentoID ?? '').trim();
+        const tipo = String(r.Tipo ?? '').trim();
+        if (!numero) throw new Error('Hay una fila sin DocumentoID.');
+        if (!tipo) throw new Error(`Documento ${numero}: falta la columna Tipo.`);
         if (!r.PNR || String(r.PNR).toLowerCase() === 'undefined') {
-          throw new Error(`Documento ${docId}: falta PNR en una fila.`);
+          throw new Error(`Documento ${numero}: falta PNR en una fila.`);
         }
         const amt = Number(r.MontoPNR);
         if (!Number.isFinite(amt) || amt <= 0) {
-          throw new Error(`Documento ${docId}: MontoPNR inválido para PNR ${r.PNR}.`);
+          throw new Error(`Documento ${numero}: MontoPNR inválido para PNR ${r.PNR}.`);
         }
-        const arr = byDoc.get(docId) ?? [];
+        const dkey = `${tipo}||${numero}`;
+        const arr = byDoc.get(dkey) ?? [];
         arr.push({ reference: String(r.PNR).toUpperCase(), amount: amt });
-        byDoc.set(docId, arr);
+        byDoc.set(dkey, arr);
       }
 
-      // Validar existencia y que no se exceda el total por documento.
+      // Resuelve cada documento por (Tipo + Número) y valida que no exceda el total.
       const round2 = (n: number) => Math.round(n * 100) / 100;
-      for (const [docId, pnrs] of byDoc) {
-        const doc = cobranzaDocs.find((d) => d.id === docId);
-        if (!doc) throw new Error(`El documento ${docId} no existe.`);
+      const docKey = (d: (typeof cobranzaDocs)[number]) => `${d.typeCode}||${d.documentNumber}`;
+      for (const [dkey, pnrs] of byDoc) {
+        const doc = cobranzaDocs.find((d) => docKey(d) === dkey);
+        if (!doc) throw new Error(`No existe el documento ${dkey.replace('||', ' ')}.`);
         const existingSum = doc.subDocuments.reduce((sum, x) => sum + x.amount, 0);
         const addSum = pnrs.reduce((sum, x) => sum + x.amount, 0);
         if (round2(existingSum + addSum) > round2(doc.totalAmount) + 0.01) {
           throw new Error(
-            `Documento ${docId}: los PNRs (${round2(existingSum + addSum)}) exceden el total (${round2(doc.totalAmount)}).`
+            `Documento ${doc.documentNumber} (${doc.type}): los PNRs (${round2(existingSum + addSum)}) exceden el total (${round2(doc.totalAmount)}).`
           );
         }
       }
 
-      // Aplicar a cada documento.
+      // Aplicar a cada documento (por su Tipo+Número).
       setCobranzaDocs((prev) =>
         prev.map((doc) => {
-          const pnrs = byDoc.get(doc.id);
+          const pnrs = byDoc.get(docKey(doc));
           if (!pnrs) return doc;
           const newSubs = pnrs.map((p) => ({
             id: `SUB-${Math.random()}`,
@@ -719,8 +922,8 @@ export function CobranzaManagement({
   };
 
   const onDownloadPaymentsTemplate = () => {
-    const headers = ['DocumentoID', 'MovimientoID', 'Monto'].join(';');
-    const sample = 'FAC-1001;CL-BAN-5678-202606-000123;50000';
+    const headers = ['DocumentoID', 'Tipo', 'MovimientoID', 'Monto'].join(';');
+    const sample = 'FAC-1001;33;CL-BAN-5678-202606-000123;50000'; // Tipo = código
     const blob = new Blob([`${headers}\n${sample}\n`], { type: 'text/csv;charset=utf-8;' });
     const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
@@ -757,20 +960,26 @@ export function CobranzaManagement({
       );
 
       const ncBalances = new Map(
-        updatedDocs.filter((d) => d.type === 'Nota de Crédito').map((d) => [d.id, d.pendingAmount])
+        updatedDocs
+          .filter((d) => d.type === 'Nota de Crédito')
+          .map((d) => [d.documentNumber, d.pendingAmount])
       );
 
       let successCount = 0;
 
       for (const row of rows) {
         const docId = String(row.DocumentoID);
+        const tipo = String(row.Tipo ?? '').trim();
         const movId = String(row.MovimientoID);
         const requestedAmount =
           row.Monto === undefined || row.Monto === null || row.Monto === ''
             ? null
             : Number(row.Monto);
 
-        const dIdx = updatedDocs.findIndex((d) => d.id === docId);
+        // Documento objetivo por Número + Tipo (Número solo ya no es único).
+        const dIdx = updatedDocs.findIndex(
+          (d) => d.documentNumber === docId && (tipo ? d.typeCode === tipo : true)
+        );
         if (dIdx === -1) continue;
 
         const doc = updatedDocs[dIdx];
@@ -804,7 +1013,9 @@ export function CobranzaManagement({
         // 2. Si no es banco, intentar buscar en Notas de Crédito
         else if (ncBalances.has(movId) && ncBalances.get(movId)! > 0.01) {
           // Check for available balance
-          const nc = updatedDocs.find((d) => d.id === movId)!;
+          const nc = updatedDocs.find(
+            (d) => d.type === 'Nota de Crédito' && d.documentNumber === movId
+          )!;
           paymentSource = { amount: ncBalances.get(movId)!, date: nc.date, bank: 'Aplicación NC' };
         }
 
@@ -858,7 +1069,7 @@ export function CobranzaManagement({
                 ...currentMov.documents,
                 {
                   id: `DOC-MASS-${Date.now()}-${successCount}`,
-                  reference: doc.id,
+                  reference: doc.documentNumber,
                   amount: appliedAmount,
                   detail: 'Carga Masiva',
                 },
@@ -866,7 +1077,9 @@ export function CobranzaManagement({
             };
           } else {
             ncBalances.set(movId, paymentSource.amount - appliedAmount);
-            const ncIdx = updatedDocs.findIndex((d) => d.id === movId);
+            const ncIdx = updatedDocs.findIndex(
+              (d) => d.type === 'Nota de Crédito' && d.documentNumber === movId
+            );
             updatedDocs[ncIdx] = {
               ...updatedDocs[ncIdx],
               pendingAmount: paymentSource.amount - appliedAmount,
@@ -1068,7 +1281,9 @@ export function CobranzaManagement({
               </tr>
             </thead>
             <tbody>
-              {processedDocs.length === 0 ? (
+              {loading ? (
+                <TableLoadingRow colSpan={7} label="Cargando documentos…" />
+              ) : processedDocs.length === 0 ? (
                 <tr>
                   <td colSpan={7} className="p-8 text-center text-slate-400 italic">
                     No se encontraron documentos
@@ -1080,9 +1295,9 @@ export function CobranzaManagement({
                     key={d.id}
                     className={`border-b hover:bg-slate-50/80 transition-colors ${d.displayStatus === 'Pagado' ? 'bg-emerald-50/20' : d.displayStatus === 'Parcial' ? 'bg-amber-50/20' : ''}`}
                   >
-                    <td className="px-4 py-4 font-mono text-[11px] text-slate-500">{d.id}</td>
+                    <td className="px-4 py-4 font-mono text-[11px] text-slate-500">{d.documentNumber}</td>
                     <td className="px-4 py-4">
-                      <div className="font-semibold text-slate-700">{d.type}</div>
+                      <div className="font-semibold text-slate-700">{docLabel(d.country, d.typeCode)}</div>
                       <div className="text-[10px] text-slate-400">{formatDate(d.date)}</div>
                     </td>
                     <td className="px-4 py-4">
@@ -1153,9 +1368,30 @@ export function CobranzaManagement({
                             onClick={() => {
                               setSelectedDocId(d.id);
                               setIsPaymentModalOpen(true);
+                              void loadBankSources();
                             }}
                           >
                             Asociar Pago
+                          </Button>
+                        )}
+                        {d.payments.length === 0 && (
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            className="h-8 text-[10px]"
+                            onClick={() => openEditDoc(d)}
+                          >
+                            Editar
+                          </Button>
+                        )}
+                        {d.payments.length === 0 && (
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            className="h-8 text-[10px] text-red-600 border-red-200 hover:bg-red-50 hover:text-red-700"
+                            onClick={() => onAnnulDocument(d)}
+                          >
+                            Anular
                           </Button>
                         )}
                       </div>
@@ -1263,11 +1499,44 @@ export function CobranzaManagement({
         </DialogContent>
       </Dialog>
 
+      {/* Modal Editar Documento (solo sin pagos) */}
+      <Dialog open={!!editDoc} onOpenChange={(o) => !o && setEditDoc(null)}>
+        <DialogContent className="max-w-xs">
+          <DialogHeader>
+            <DialogTitle>Editar {editDoc?.documentNumber}</DialogTitle>
+            <DialogDescription>
+              Solo documentos sin pagos. Puedes ajustar fecha y monto total.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-3 py-2">
+            <div className="space-y-1">
+              <label className="text-xs font-medium">Fecha de emisión</label>
+              <Input type="date" value={editDate} onChange={(e) => setEditDate(e.target.value)} />
+            </div>
+            <div className="space-y-1">
+              <label className="text-xs font-medium">Monto total</label>
+              <Input
+                type="number"
+                value={editTotal}
+                onChange={(e) => setEditTotal(e.target.value)}
+              />
+            </div>
+            {editDocError && <p className="text-xs text-red-600">{editDocError}</p>}
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setEditDoc(null)}>
+              Cancelar
+            </Button>
+            <Button onClick={onSaveDocEdit}>Guardar</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
       {/* Modal Detalle de Pagos Recibidos */}
       <Dialog open={isPayDetailModalOpen} onOpenChange={setIsPayDetailModalOpen}>
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>Pagos Asociados - {selectedDocForDetails?.id}</DialogTitle>
+            <DialogTitle>Pagos Asociados - {selectedDocForDetails?.documentNumber}</DialogTitle>
           </DialogHeader>
           <div className="space-y-3 mt-4">
             {selectedDocForDetails?.payments.length === 0 ? (
@@ -1285,8 +1554,18 @@ export function CobranzaManagement({
                         Fecha: {formatDate(p.date)} | ID: {p.movementId}
                       </div>
                     </div>
-                    <div className="text-right font-bold text-emerald-700 text-sm">
-                      + ${p.amount.toLocaleString()}
+                    <div className="flex items-center gap-2">
+                      <div className="text-right font-bold text-emerald-700 text-sm">
+                        + ${p.amount.toLocaleString()}
+                      </div>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        className="h-7 text-[10px] text-red-600 border-red-200 hover:bg-red-50 hover:text-red-700"
+                        onClick={() => selectedDocForDetails && onReversePayment(selectedDocForDetails, p)}
+                      >
+                        Reversar
+                      </Button>
                     </div>
                   </div>
                 ))}
@@ -1324,6 +1603,7 @@ export function CobranzaManagement({
               onClick={() => {
                 setPaymentSourceType('bank');
                 setPaymentMovId('');
+                void loadBankSources();
               }}
             >
               Movimiento Bancario
@@ -1353,26 +1633,12 @@ export function CobranzaManagement({
               >
                 <option value="">Seleccionar...</option>
                 {paymentSourceType === 'bank'
-                  ? movements
-                      .filter((m) => {
-                        const used = m.documents.reduce((s, d) => s + d.amount, 0);
-                        // Mostrar si no tiene tipo o si es de cobranza pero aún le queda saldo
-                        return (
-                          (m.mainIdentification === 'Sin identificar' ||
-                            m.mainIdentification === 'Cobranza crédito') &&
-                          used < m.amount - 0.01
-                        );
-                      })
-                      .map((m) => {
-                        const used = m.documents.reduce((s, d) => s + d.amount, 0);
-                        const available = m.amount - used;
-                        return (
-                          <option key={m.movementId} value={m.movementId}>
-                            {formatDate(m.date)} - {m.bank} (Disp: ${available.toLocaleString()} / Total: $
-                            {m.amount.toLocaleString()})
-                          </option>
-                        );
-                      })
+                  ? bankSources.map((m) => (
+                      <option key={m.movementId} value={m.movementId}>
+                        {formatDate(m.date)} - {m.bank} (Disp: ${m.availableAmount.toLocaleString()} /
+                        Total: ${m.amount.toLocaleString()})
+                      </option>
+                    ))
                   : cobranzaDocs
                       .filter(
                         (d) =>
@@ -1382,7 +1648,7 @@ export function CobranzaManagement({
                       )
                       .map((d) => (
                         <option key={d.id} value={d.id}>
-                          {d.id} (Saldo: ${d.pendingAmount.toLocaleString()})
+                          {d.documentNumber} (Saldo: ${d.pendingAmount.toLocaleString()})
                         </option>
                       ))}
               </select>
@@ -1400,6 +1666,27 @@ export function CobranzaManagement({
                 Saldo Pendiente del Documento: $
                 {cobranzaDocs.find((d) => d.id === selectedDocId)?.pendingAmount.toLocaleString()}
               </p>
+              {(() => {
+                const pend = cobranzaDocs.find((d) => d.id === selectedDocId)?.pendingAmount ?? 0;
+                const amt = Number(paymentAmount);
+                if (!paymentAmount || isNaN(amt) || amt <= 0) return null;
+                if (amt > pend + 0.01)
+                  return (
+                    <p className="text-[11px] font-medium text-red-600">
+                      El monto excede el saldo pendiente (${pend.toLocaleString()}).
+                    </p>
+                  );
+                const rest = Math.round((pend - amt) * 100) / 100;
+                return rest <= 0.01 ? (
+                  <p className="text-[11px] font-medium text-emerald-700">
+                    Cubre el total: el documento quedará <b>Pagado</b>.
+                  </p>
+                ) : (
+                  <p className="text-[11px] font-medium text-amber-700">
+                    Pago <b>PARCIAL</b>: quedará un saldo pendiente de ${rest.toLocaleString()}.
+                  </p>
+                );
+              })()}
             </div>
           </div>
           <DialogFooter>

@@ -16,6 +16,9 @@ import {
   DialogFooter,
 } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
+import { SearchableSelect } from '@/components/ui/searchable-select';
+import { TableLoadingRow } from '@/components/ui/loading-row';
+import { RecaudacionSlaPanel } from '@/components/RecaudacionSlaPanel';
 import {
   BankAccount,
   CartolaMovement,
@@ -31,24 +34,29 @@ interface RecaudacionManagementProps {
   userRole: UserRole;
   bankAccounts: BankAccount[];
   clients: Client[];
-  movements: CartolaMovement[];
-  setMovements: React.Dispatch<React.SetStateAction<CartolaMovement[]>>;
   requests: CollectionRequest[];
   setRequests: React.Dispatch<React.SetStateAction<CollectionRequest[]>>;
   onReconcile: (movementId: string, documents: CartolaDocument[]) => void;
+  /** Carga inicial de datos maestros en curso (para mostrar indicador). */
+  loading?: boolean;
 }
 
 export function RecaudacionManagement({
   userRole,
   bankAccounts,
   clients,
-  movements,
-  setMovements,
   requests,
   setRequests,
   onReconcile,
+  loading = false,
 }: RecaudacionManagementProps) {
   const [manualMatchMovId, setManualMatchMovId] = useState<Record<string, string>>({});
+  // Pestaña activa: separa la operación (Solicitudes) del panel de indicadores (SLA)
+  // para que el gráfico no quede montado sobre el resto de la pantalla.
+  const [activeTab, setActiveTab] = useState<'solicitudes' | 'sla'>('solicitudes');
+  // D 2b: candidatos de movimiento traidos del servidor bajo demanda
+  // (reemplaza el filtrado sobre la lista completa `movements`).
+  const [candidatesByReq, setCandidatesByReq] = useState<Record<string, CartolaMovement[]>>({});
   // Filtros del panel (delimitan tabla Y export).
   const [fEstado, setFEstado] = useState<string>('all');
   const [fCliente, setFCliente] = useState<string>('all');
@@ -57,18 +65,23 @@ export function RecaudacionManagement({
   const [fHasta, setFHasta] = useState<string>('');
   const [fSearch, setFSearch] = useState<string>('');
   const [fDateBasis, setFDateBasis] = useState<'transfer' | 'created'>('transfer');
+  // Filtro de Acción: permite ver rápidamente qué le falta gestionar al Agente CC.
+  const [fAccion, setFAccion] = useState<string>('all');
   // Modal "Ver tiempos"
   const [tiemposReq, setTiemposReq] = useState<CollectionRequest | null>(null);
   const [selectedAccId, setSelectedAccId] = useState('');
   const [transferDate, setTransferDate] = useState('');
   const [totalAmount, setTotalAmount] = useState('');
   const [selectedClientId, setSelectedClientId] = useState('');
+  // #11 ID de cotización (opcional) asociado a la solicitud.
+  const [quotationId, setQuotationId] = useState('');
   const [pnrRef, setPnrRef] = useState('');
   const [pnrAmount, setPnrAmount] = useState('');
   const [tempDocs, setTempDocs] = useState<CartolaDocument[]>([]);
   const [supportFiles, setSupportFiles] = useState<File[]>([]);
   const [authorizationCode, setAuthorizationCode] = useState('');
   const [error, setError] = useState<string | null>(null);
+  const [submitting, setSubmitting] = useState(false);
 
   // Edit/View states
   const [editingRequestId, setEditingRequestId] = useState<string | null>(null);
@@ -85,13 +98,29 @@ export function RecaudacionManagement({
   // Busca un movimiento de cartola "Sin identificar" que calce con la solicitud
   // (cuenta + monto + fecha + banco). Se usa para preaprobar automáticamente al
   // adjuntar el comprobante a un caso que venía Pendiente (p. ej. de carga masiva).
-  const findMatchingMovement = (req: CollectionRequest) => {
+  const findMatchingMovement = async (req: {
+    bankAccountId: string;
+    amount: number;
+    transferDate: string;
+  }): Promise<CartolaMovement | undefined> => {
     const account = bankAccounts.find((a) => a.id === req.bankAccountId);
     if (!account) return undefined;
+    let candidates: CartolaMovement[] = [];
+    try {
+      const res = await fetch(
+        `/api/cartola/movements/candidates?amount=${encodeURIComponent(req.amount)}`,
+        { cache: 'no-store' }
+      );
+      if (!res.ok) return undefined;
+      const body = (await res.json()) as { candidates?: CartolaMovement[] };
+      candidates = body.candidates ?? [];
+    } catch {
+      return undefined;
+    }
     const [y, mo, d] = req.transferDate.split('-');
     const reversed = `${d}-${mo}-${y}`;
     const slashed = `${d}/${mo}/${y}`;
-    return movements.find(
+    return candidates.find(
       (mv) =>
         mv.bankAccount.toString().replace(/\D/g, '') === account.accountNumber.replace(/\D/g, '') &&
         Math.round(mv.amount) === Math.round(req.amount) &&
@@ -105,6 +134,22 @@ export function RecaudacionManagement({
 
   const generateRequestId = () =>
     `REQ-${Date.now()}-${Math.random().toString(36).slice(2, 5).toUpperCase()}`;
+
+  // D 2b: consulta candidatos 'Sin identificar' al servidor (monto +/-1),
+  // sin depender de tener toda la cartola cargada en el cliente.
+  const loadCandidates = async (req: CollectionRequest) => {
+    try {
+      const res = await fetch(
+        `/api/cartola/movements/candidates?amount=${encodeURIComponent(req.amount)}`,
+        { cache: 'no-store' }
+      );
+      if (!res.ok) return;
+      const body = (await res.json()) as { candidates?: CartolaMovement[] };
+      setCandidatesByReq((prev) => ({ ...prev, [req.id]: body.candidates ?? [] }));
+    } catch {
+      // silencioso: si falla, el selector queda vacio y se puede reintentar
+    }
+  };
 
   const onAddPnr = () => {
     // Validación alfanumérica de 6 caracteres
@@ -138,11 +183,12 @@ export function RecaudacionManagement({
       'Fecha',
       'ClienteID',
       'CodigoAutorizacion',
+      'IDCotizacion',
       'PNR',
       'MontoPNR',
       'MontoTotal',
     ].join(',');
-    const sample = '12345678,21/05/2024,CLI-1,AUTH123,ABC123,50000,50000';
+    const sample = '12345678,21/05/2024,CLI-000001,AUTH123,COT-001,ABC123,50000,50000';
     const blob = new Blob(['\uFEFF' + `${headers}\n${sample}\n`], { type: 'text/csv;charset=utf-8;' });
     const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
@@ -266,21 +312,12 @@ export function RecaudacionManagement({
         });
         // --- Fin Validaciones ---
 
-        const [year, month, day] = isoDate.split('-');
-        const reversedDate = `${day}-${month}-${year}`;
-        const slashDate = `${day}/${month}/${year}`;
-
-        const matchingMov = movements.find(
-          (m) =>
-            m.bankAccount.toString().replace(/\D/g, '') ===
-              String(first.Cuenta).replace(/\D/g, '') &&
-            Math.round(m.amount) === Math.round(totalAmount) &&
-            m.mainIdentification === 'Sin identificar' &&
-            (m.date.includes(isoDate) ||
-              m.date.includes(reversedDate) ||
-              m.date.includes(slashDate)) &&
-            m.bank.toLowerCase().includes(account.bankName.toLowerCase())
-        );
+        // D 2d: match contra el servidor (no contra la lista completa en cliente).
+        const matchingMov = await findMatchingMovement({
+          bankAccountId: account.id,
+          amount: totalAmount,
+          transferDate: isoDate,
+        });
 
         newRequests.push({
           id: generateRequestId(),
@@ -289,12 +326,17 @@ export function RecaudacionManagement({
           amount: totalAmount,
           clientId: client.id,
           authorizationCode: authCode,
+          quotationId: String(first.IDCotizacion ?? '').trim() || undefined,
           supportFileName: '',
           // La carga masiva NO trae comprobante: entra como Pendiente. Guardamos
           // el posible match para preaprobar automáticamente cuando se adjunte
           // el comprobante más tarde.
           status: 'Pendiente',
           associatedMovementId: matchingMov?.movementId,
+          // Fase 5: denormalizamos el vínculo al asociar para no depender del array
+          // compartido de Cartola en la UI.
+          associatedMovementDisplayId: matchingMov?.displayId,
+          associatedMovementBank: matchingMov?.bank,
           documents: docs,
         });
       }
@@ -308,6 +350,7 @@ export function RecaudacionManagement({
   };
 
   const onSubmitRequest = async () => {
+    if (submitting) return;
     setError(null);
 
     // Validación de campos obligatorios
@@ -353,26 +396,15 @@ export function RecaudacionManagement({
 
     // Lógica de Preaprobación Automática Robusta
     // transferDate viene como YYYY-MM-DD desde el input
-    const [year, month, day] = transferDate.split('-');
-    const reversedDate = `${day}-${month}-${year}`; // Formato DD-MM-YYYY común en cartolas
-    const slashDate = `${day}/${month}/${year}`;
-
-    const matchingMovement = movements.find(
-      (m) =>
-        // 1. Comparación de Cuenta (solo dígitos)
-        m.bankAccount.toString().replace(/\D/g, '') === account.accountNumber.replace(/\D/g, '') &&
-        // 2. Comparación de Monto (redondeado para evitar problemas de decimales)
-        Math.round(m.amount) === Math.round(total) &&
-        // 3. Solo movimientos no identificados
-        m.mainIdentification === 'Sin identificar' &&
-        // 4. Comparación de Fecha Flexible
-        // Valida si la fecha de la cartola contiene YYYY-MM-DD o coincide con DD-MM-YYYY
-        (m.date.includes(transferDate) ||
-          m.date.includes(reversedDate) ||
-          m.date.includes(slashDate)) &&
-        // 5. El banco debe coincidir (búsqueda parcial)
-        m.bank.toLowerCase().includes(account.bankName.toLowerCase())
-    );
+    // D 2d: preaprobacion automatica: el match lo resuelve el servidor (endpoint
+    // de candidatos), sin depender de la cartola completa cargada en cliente.
+    setSubmitting(true);
+    try {
+    const matchingMovement = await findMatchingMovement({
+      bankAccountId: selectedAccId,
+      amount: total,
+      transferDate,
+    });
 
     // Pre-chequeo en cliente (mejor UX); el servidor valida de forma autoritativa
     // contra el historico completo aunque no este cargado en pantalla.
@@ -414,11 +446,16 @@ export function RecaudacionManagement({
       clientId: selectedClientId,
       supportFileName: mergedAttachments[0]?.fileName ?? existingReq?.supportFileName ?? '',
       authorizationCode: code,
+      quotationId: quotationId.trim() || undefined,
       attachments: mergedAttachments,
       attachmentIds: uploaded.map((a) => a.id),
       // Preaprobación automática SOLO si además hay comprobante adjunto.
       status: matchingMovement && mergedAttachments.length > 0 ? 'Preaprobado' : 'Pendiente',
       associatedMovementId: matchingMovement?.movementId,
+      // Fase 5: denormalizamos el vínculo al asociar (fallback al existente al editar).
+      associatedMovementDisplayId:
+        matchingMovement?.displayId ?? existingReq?.associatedMovementDisplayId,
+      associatedMovementBank: matchingMovement?.bank ?? existingReq?.associatedMovementBank,
       documents: tempDocs,
     };
 
@@ -439,7 +476,11 @@ export function RecaudacionManagement({
     setSelectedClientId('');
     setSupportFiles([]);
     setAuthorizationCode('');
+    setQuotationId('');
     setError(null);
+    } finally {
+      setSubmitting(false);
+    }
   };
 
   const onEditRequest = (req: CollectionRequest) => {
@@ -450,6 +491,7 @@ export function RecaudacionManagement({
     setSelectedClientId(req.clientId);
     setTempDocs(req.documents);
     setAuthorizationCode(req.authorizationCode ?? '');
+    setQuotationId(req.quotationId ?? '');
     // supportFile cannot be pre-filled for security reasons, user must re-upload if needed
     setSupportFiles([]);
     setError(null);
@@ -464,6 +506,24 @@ export function RecaudacionManagement({
     setSelectedClientId('');
     setSupportFiles([]);
     setAuthorizationCode('');
+    setQuotationId('');
+    setError(null);
+  };
+
+  // Limpia el formulario de una NUEVA solicitud (sin salir del modo edición si lo
+  // estuviera). Borra también los PNRs cargados y los comprobantes ya subidos, para
+  // no dejar data pegada de una carga anterior.
+  const clearForm = () => {
+    setTempDocs([]);
+    setTotalAmount('');
+    setTransferDate('');
+    setSelectedAccId('');
+    setSelectedClientId('');
+    setSupportFiles([]);
+    setAuthorizationCode('');
+    setQuotationId('');
+    setPnrRef('');
+    setPnrAmount('');
     setError(null);
   };
 
@@ -525,16 +585,36 @@ export function RecaudacionManagement({
           return;
         }
         onReconcile(selectedId, req.documents);
+        // D 2d: guardamos displayId+banco del candidato elegido (denormalizado
+        // optimista) para mostrar el vinculo sin depender de la cartola completa.
+        const chosenMov = (candidatesByReq[reqId] ?? []).find((m) => m.movementId === selectedId);
         setRequests(
           requests.map((r) =>
-            r.id === reqId ? { ...r, status: 'Aprobado', associatedMovementId: selectedId } : r
+            r.id === reqId
+              ? {
+                  ...r,
+                  status: 'Aprobado',
+                  financeApproved: true,
+                  associatedMovementId: selectedId,
+                  associatedMovementDisplayId: chosenMov?.displayId ?? r.associatedMovementDisplayId,
+                  associatedMovementBank: chosenMov?.bank ?? r.associatedMovementBank,
+                }
+              : r
           )
         );
+      } else if (req.status === 'GestionadoCC') {
+        // Track paralelo: mantiene el estado CC (Gestionado) y solo marca la
+        // aprobación de Finanzas.
+        setRequests(requests.map((r) => (r.id === req.id ? { ...r, financeApproved: true } : r)));
       } else {
-        // Preaprobado, solo confirmar
-        setRequests(requests.map((r) => (r.id === req.id ? { ...r, status: 'Aprobado' } : r)));
+        // Preaprobado (u otro): pasa a Aprobado + marca de Finanzas.
+        setRequests(
+          requests.map((r) =>
+            r.id === req.id ? { ...r, status: 'Aprobado', financeApproved: true } : r
+          )
+        );
       }
-      alert('Solicitud aprobada correctamente.');
+      alert('Aprobación de Recaudación registrada.');
     }
   };
 
@@ -552,12 +632,17 @@ export function RecaudacionManagement({
     setRequests(
       requests.map((r) =>
         r.id === reqId
-          ? { ...r, status: 'InformacionSolicitada', infoRequestComment: comment }
+          ? {
+              ...r,
+              status: 'InformacionSolicitada',
+              financeApproved: false,
+              infoRequestComment: comment,
+            }
           : r
       )
     );
     alert(
-      'Solicitud reversada. Volvió a "Info solicitada" con tu comentario y el movimiento se liberó a "por identificar".'
+      'Solicitud reversada. Volvió a "Info solicitada", se quitó la aprobación de Finanzas y el movimiento se liberó a "por identificar".'
     );
   };
 
@@ -565,10 +650,11 @@ export function RecaudacionManagement({
   // el cliente final. El movimiento permanece identificado (no se libera).
   const onMarkGestionadoCC = (reqId: string) => {
     const req = requests.find((r) => r.id === reqId);
-    if (!req || req.status !== 'Aprobado') return;
+    // Desde Preaprobado o Aprobado el Agente CC puede cerrar el caso como Gestionado.
+    if (!req || (req.status !== 'Aprobado' && req.status !== 'Preaprobado')) return;
     if (
       !window.confirm(
-        '¿Marcar como "Gestionado CC"? Es el estado final: confirma que ya gestionaste el cobro con el cliente.'
+        '¿Marcar como "Gestionado CC"? Es el estado final: confirma que ya creaste la reserva y añadiste el pago a la misma.'
       )
     ) {
       return;
@@ -624,6 +710,17 @@ export function RecaudacionManagement({
     try {
       const uploaded = await uploadAttachments(newSupportFilesForRequest, targetId);
       let autoPreapproved = false;
+      // D 2d: resolvemos el match contra el servidor ANTES de actualizar el estado
+      // (no se puede await dentro del updater). Solo aplica si venia Pendiente.
+      const targetReq = requests.find((r) => r.id === targetId);
+      let matchedMov: CartolaMovement | undefined;
+      if (targetReq && targetReq.status === 'Pendiente') {
+        matchedMov = await findMatchingMovement({
+          bankAccountId: targetReq.bankAccountId,
+          amount: targetReq.amount,
+          transferDate: targetReq.transferDate,
+        });
+      }
       setRequests((prev) =>
         prev.map((req) => {
           if (req.id !== targetId) return req;
@@ -632,21 +729,13 @@ export function RecaudacionManagement({
             supportFileName: req.supportFileName || uploaded[0]?.fileName || '',
             attachments: [...(req.attachments ?? []), ...uploaded],
           };
-          // Si venía Pendiente y ahora tiene comprobante, intentamos preaprobar
-          // automáticamente contra un movimiento que calce (el comprobante ya es
-          // obligatorio para preaprobar).
-          if (withFiles.status === 'Pendiente') {
-            const match = req.associatedMovementId
-              ? movements.find((m) => m.movementId === req.associatedMovementId)
-              : findMatchingMovement(withFiles);
-            if (match && match.mainIdentification === 'Sin identificar') {
-              autoPreapproved = true;
-              return {
-                ...withFiles,
-                status: 'Preaprobado',
-                associatedMovementId: match.movementId,
-              };
-            }
+          if (withFiles.status === 'Pendiente' && matchedMov) {
+            autoPreapproved = true;
+            return {
+              ...withFiles,
+              status: 'Preaprobado',
+              associatedMovementId: matchedMov.movementId,
+            };
           }
           return withFiles;
         })
@@ -666,6 +755,9 @@ export function RecaudacionManagement({
   };
 
   const onDeleteAttachment = async (reqId: string, attachmentId: string) => {
+    if (!window.confirm('¿Eliminar este comprobante? Esta acción no se puede deshacer.')) {
+      return;
+    }
     const res = await fetch(`/api/recaudacion/attachments/${attachmentId}`, { method: 'DELETE' });
     if (!res.ok) {
       alert('No se pudo eliminar el comprobante.');
@@ -697,6 +789,15 @@ export function RecaudacionManagement({
     if (fEstado !== 'all' && r.status !== fEstado) return false;
     if (fCliente !== 'all' && r.clientId !== fCliente) return false;
     if (fCuenta !== 'all' && r.bankAccountId !== fCuenta) return false;
+    // Filtro de Acción (gestión del Agente CC).
+    if (fAccion === 'por_gestionar' && !(r.status === 'Preaprobado' || r.status === 'Aprobado'))
+      return false;
+    if (
+      fAccion === 'no_gestionado' &&
+      (r.status === 'GestionadoCC' || r.status === 'Anulado' || r.status === 'Rechazado')
+    )
+      return false;
+    if (fAccion === 'gestionado' && r.status !== 'GestionadoCC') return false;
     const baseDate = fDateBasis === 'created' ? (r.createdAt ?? r.transferDate) : r.transferDate;
     const day = toIsoDay(baseDate);
     if (fDesde && day < fDesde) return false;
@@ -707,6 +808,7 @@ export function RecaudacionManagement({
       const hay = [
         r.id,
         r.authorizationCode,
+        r.quotationId,
         r.associatedMovementId,
         cli?.name,
         cli?.appCode,
@@ -734,26 +836,26 @@ export function RecaudacionManagement({
     const data = filteredRequests.map((r) => {
       const acc = bankAccounts.find((a) => a.id === r.bankAccountId);
       const cli = clients.find((c) => c.id === r.clientId);
-      const mov = r.associatedMovementId
-        ? movements.find((m) => m.movementId === r.associatedMovementId)
-        : undefined;
       return {
         ID: r.id,
         Estado: r.status,
         Cliente: cli?.name || 'N/A',
         Cliente_Codigo: cli?.appCode || cli?.navitaireCode || cli?.sapBP || cli?.id || '',
+        Agente_CC: r.createdByName || '',
         Banco: acc?.bankName || 'N/A',
         Cuenta: acc?.accountNumber || 'N/A',
         Fecha_Transferencia: formatDate(r.transferDate),
         Monto_Total: r.amount,
         Codigo_Autorizacion: r.authorizationCode || '',
-        Movimiento_Cartola: mov?.displayId || r.associatedMovementId || '',
+        ID_Cotizacion: r.quotationId || '',
+        Movimiento_Cartola: r.associatedMovementDisplayId || r.associatedMovementId || '',
         Cant_PNRs: r.documents.length,
         PNRs: r.documents.map((d) => d.reference).join(', '),
         Comprobantes: r.attachments?.length ?? 0,
         Motivo_Comentario: r.rejectionComment || r.infoRequestComment || '',
         // Tiempos por etapa
         Fecha_Creado: r.createdAt ? formatDate(r.createdAt) : '',
+        Fecha_Ultima_Accion: r.updatedAt ? formatDate(r.updatedAt) : '',
         Fecha_Preaprobado: r.preapprovedAt ? formatDate(r.preapprovedAt) : '',
         Fecha_Aprobado: r.approvedAt ? formatDate(r.approvedAt) : '',
         Fecha_Gestionado: r.gestionadoCcAt ? formatDate(r.gestionadoCcAt) : '',
@@ -773,6 +875,37 @@ export function RecaudacionManagement({
 
   return (
     <div className="space-y-6">
+      {/* Pestañas: descongestionan la pantalla separando la operación del panel de
+          indicadores. Por defecto abre "Solicitudes"; el SLA vive en su propia pestaña. */}
+      <div className="flex gap-1 border-b">
+        <button
+          type="button"
+          onClick={() => setActiveTab('solicitudes')}
+          className={`-mb-px border-b-2 px-4 py-2 text-sm font-medium transition-colors ${
+            activeTab === 'solicitudes'
+              ? 'border-jetsmart-blue text-jetsmart-blue'
+              : 'border-transparent text-slate-500 hover:text-slate-700'
+          }`}
+        >
+          Solicitudes
+        </button>
+        <button
+          type="button"
+          onClick={() => setActiveTab('sla')}
+          className={`-mb-px border-b-2 px-4 py-2 text-sm font-medium transition-colors ${
+            activeTab === 'sla'
+              ? 'border-jetsmart-blue text-jetsmart-blue'
+              : 'border-transparent text-slate-500 hover:text-slate-700'
+          }`}
+        >
+          Indicadores (SLA)
+        </button>
+      </div>
+
+      {activeTab === 'sla' && <RecaudacionSlaPanel requests={requests} />}
+
+      {activeTab === 'solicitudes' && (
+        <>
       {isAgente && (
         <Card className="p-4">
           <div className="flex justify-between items-center mb-4">
@@ -792,18 +925,15 @@ export function RecaudacionManagement({
           <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-4">
             <div className="space-y-1">
               <label className="text-xs font-medium">Cuenta Bancaria</label>
-              <select
-                className="w-full h-10 rounded-md border px-3 text-sm"
+              <SearchableSelect
                 value={selectedAccId}
-                onChange={(e) => setSelectedAccId(e.target.value)}
-              >
-                <option value="">Seleccione cuenta...</option>
-                {bankAccounts.map((a) => (
-                  <option key={a.id} value={a.id}>
-                    {a.displayId || a.id} | {a.bankName} - {a.accountNumber} | {a.currency}
-                  </option>
-                ))}
-              </select>
+                onChange={setSelectedAccId}
+                placeholder="Seleccione cuenta..."
+                options={bankAccounts.map((a) => ({
+                  value: a.id,
+                  label: `${a.displayId || a.id} | ${a.bankName} - ${a.accountNumber} | ${a.currency}`,
+                }))}
+              />
             </div>
             <div className="space-y-1">
               <label className="text-xs font-medium">Fecha Transferencia</label>
@@ -824,18 +954,15 @@ export function RecaudacionManagement({
             </div>
             <div className="space-y-1">
               <label className="text-xs font-medium">Cliente</label>
-              <select
-                className="w-full h-10 rounded-md border px-3 text-sm"
+              <SearchableSelect
                 value={selectedClientId}
-                onChange={(e) => setSelectedClientId(e.target.value)}
-              >
-                <option value="">Buscar cliente...</option>
-                {clients.map((c) => (
-                  <option key={c.id} value={c.id}>
-                    {c.appCode || c.id} | {c.name} ({c.taxId})
-                  </option>
-                ))}
-              </select>
+                onChange={setSelectedClientId}
+                placeholder="Buscar cliente..."
+                options={clients.map((c) => ({
+                  value: c.id,
+                  label: `${c.appCode || c.id} | ${c.name} (${c.taxId})`,
+                }))}
+              />
             </div>
             <div className="space-y-1">
               <label className="text-xs font-medium">Código de autorización</label>
@@ -843,6 +970,16 @@ export function RecaudacionManagement({
                 value={authorizationCode}
                 onChange={(e) => setAuthorizationCode(e.target.value)}
                 placeholder="Código del comprobante bancario"
+              />
+            </div>
+            <div className="space-y-1">
+              <label className="text-xs font-medium">
+                ID de cotización <span className="text-slate-400">(opcional)</span>
+              </label>
+              <Input
+                value={quotationId}
+                onChange={(e) => setQuotationId(e.target.value)}
+                placeholder="ID de la cotización asociada"
               />
             </div>
             <div className="space-y-1">
@@ -896,14 +1033,28 @@ export function RecaudacionManagement({
           </div>
 
           {error && <p className="text-xs text-red-600 mt-2">{error}</p>}
+          {submitting && (
+            <p className="mt-2 flex items-center gap-2 text-xs text-slate-500">
+              <span className="h-3 w-3 animate-spin rounded-full border-2 border-slate-300 border-t-slate-600" />
+              Guardando la solicitud, espere un momento…
+            </p>
+          )}
 
           <div className="flex gap-3 mt-4">
-            <Button className="flex-1" onClick={onSubmitRequest}>
-              {editingRequestId ? 'Actualizar Solicitud' : 'Enviar Solicitud'}
+            <Button className="flex-1" onClick={onSubmitRequest} disabled={submitting}>
+              {submitting
+                ? 'Guardando…'
+                : editingRequestId
+                  ? 'Actualizar Solicitud'
+                  : 'Enviar Solicitud'}
             </Button>
-            {editingRequestId && (
-              <Button variant="outline" onClick={onCancelEdit}>
+            {editingRequestId ? (
+              <Button variant="outline" onClick={onCancelEdit} disabled={submitting}>
                 Cancelar Edición
+              </Button>
+            ) : (
+              <Button variant="outline" onClick={clearForm} disabled={submitting}>
+                Limpiar
               </Button>
             )}
           </div>
@@ -941,28 +1092,35 @@ export function RecaudacionManagement({
           </select>
           <select
             className="h-9 rounded-md border bg-white px-2 text-xs"
+            value={fAccion}
+            onChange={(e) => setFAccion(e.target.value)}
+            title="Filtra por la gestión del Agente CC"
+          >
+            <option value="all">Acción: Todas</option>
+            <option value="por_gestionar">Por gestionar CC (Preap./Aprob.)</option>
+            <option value="no_gestionado">No gestionadas por CC</option>
+            <option value="gestionado">Gestionadas por CC</option>
+          </select>
+          <SearchableSelect
             value={fCliente}
-            onChange={(e) => setFCliente(e.target.value)}
-          >
-            <option value="all">Todos los clientes</option>
-            {clients.map((c) => (
-              <option key={c.id} value={c.id}>
-                {c.name}
-              </option>
-            ))}
-          </select>
-          <select
-            className="h-9 rounded-md border bg-white px-2 text-xs"
+            onChange={setFCliente}
+            allLabel="Todos los clientes"
+            placeholder="Buscar cliente…"
+            options={clients.map((c) => ({
+              value: c.id,
+              label: c.appCode ? `${c.name} (${c.appCode})` : c.name,
+            }))}
+          />
+          <SearchableSelect
             value={fCuenta}
-            onChange={(e) => setFCuenta(e.target.value)}
-          >
-            <option value="all">Todas las cuentas</option>
-            {bankAccounts.map((a) => (
-              <option key={a.id} value={a.id}>
-                {a.bankName} - {a.accountNumber}
-              </option>
-            ))}
-          </select>
+            onChange={setFCuenta}
+            allLabel="Todas las cuentas"
+            placeholder="Buscar cuenta…"
+            options={bankAccounts.map((a) => ({
+              value: a.id,
+              label: `${a.bankName} - ${a.accountNumber}`,
+            }))}
+          />
           <select
             className="h-9 rounded-md border bg-white px-2 text-xs"
             value={fDateBasis}
@@ -991,7 +1149,7 @@ export function RecaudacionManagement({
             className="h-9 rounded-md border bg-white px-2 text-xs"
             value={fSearch}
             onChange={(e) => setFSearch(e.target.value)}
-            placeholder="Buscar (cód. aut. / PNR / ID)"
+            placeholder="Buscar (cód. aut. / cotización / PNR / ID)"
           />
         </div>
         <div className="mb-2 flex items-center justify-between text-[11px] text-slate-500">
@@ -1002,6 +1160,7 @@ export function RecaudacionManagement({
           {(fEstado !== 'all' ||
             fCliente !== 'all' ||
             fCuenta !== 'all' ||
+            fAccion !== 'all' ||
             fDesde ||
             fHasta ||
             fSearch) && (
@@ -1011,6 +1170,7 @@ export function RecaudacionManagement({
                 setFEstado('all');
                 setFCliente('all');
                 setFCuenta('all');
+                setFAccion('all');
                 setFDesde('');
                 setFHasta('');
                 setFSearch('');
@@ -1037,7 +1197,9 @@ export function RecaudacionManagement({
               </tr>
             </thead>
             <tbody>
-              {filteredRequests.length === 0 ? (
+              {loading ? (
+                <TableLoadingRow colSpan={9} label="Cargando solicitudes…" />
+              ) : filteredRequests.length === 0 ? (
                 <tr>
                   <td colSpan={9} className="text-center py-4 text-slate-400">
                     No hay solicitudes que coincidan con los filtros.
@@ -1053,9 +1215,12 @@ export function RecaudacionManagement({
                   .map((r) => {
                   const associatedAccount = bankAccounts.find((acc) => acc.id === r.bankAccountId);
                   const associatedClient = clients.find((c) => c.id === r.clientId);
-                  const associatedMovement = r.associatedMovementId
-                    ? movements.find((m) => m.movementId === r.associatedMovementId)
-                    : null;
+                  // D 2c / Fase 5: usamos el vínculo denormalizado del servidor
+                  // (se setea al asociar), sin depender del array compartido de Cartola.
+                  const hasMovLink = Boolean(r.associatedMovementId);
+                  const movLinkBank = r.associatedMovementBank || '';
+                  const movLinkDisplay =
+                    r.associatedMovementDisplayId || r.associatedMovementId || '';
 
                   return (
                     <tr
@@ -1073,18 +1238,23 @@ export function RecaudacionManagement({
                           Transferencia: {formatDate(r.transferDate)} |{' '}
                           <b>${r.amount.toLocaleString()}</b>
                         </div>
-                        {associatedMovement && (
+                        {hasMovLink && (
                           <div className="text-[10px] text-emerald-600 mt-1 bg-emerald-50 p-1 rounded border border-emerald-100">
-                            Vínculo Cartola: {associatedMovement.bank} (
-                            {associatedMovement.displayId || associatedMovement.movementId})
+                            Vínculo Cartola: {movLinkBank} ({movLinkDisplay})
                           </div>
                         )}
                       </td>
                       <td className="px-3 py-3 text-xs whitespace-nowrap">
-                        {r.createdAt ? formatDate(r.createdAt) : '—'}
+                        <div>{r.createdAt ? formatDate(r.createdAt) : '—'}</div>
+                        {r.createdByName && (
+                          <div className="text-[10px] text-slate-500">por {r.createdByName}</div>
+                        )}
                       </td>
                       <td className="px-3 py-3 text-xs font-mono whitespace-nowrap">
                         {r.authorizationCode || '—'}
+                        {r.quotationId && (
+                          <div className="text-[10px] text-slate-500">Cot: {r.quotationId}</div>
+                        )}
                       </td>
                       <td className="px-3 py-3">
                         <div>{associatedClient?.name}</div>
@@ -1215,14 +1385,10 @@ export function RecaudacionManagement({
                                     [r.id]: e.target.value,
                                   })
                                 }
+                                onFocus={() => loadCandidates(r)}
                               >
                                 <option value="">Vincular Movimiento...</option>
-                                {movements
-                                  .filter(
-                                    (m) =>
-                                      m.mainIdentification === 'Sin identificar' &&
-                                      Math.abs(m.amount - r.amount) < 1
-                                  )
+                                {(candidatesByReq[r.id] ?? [])
                                   .map((m) => (
                                     <option key={m.movementId} value={m.movementId}>
                                       {m.date} - {m.bank} (${m.amount.toLocaleString()})
@@ -1269,7 +1435,7 @@ export function RecaudacionManagement({
                             Responder (reenviar)
                           </Button>
                         )}
-                        {isAgente && (r.status === 'Pendiente' || r.status === 'Preaprobado') && (
+                        {isAgente && r.status === 'Pendiente' && (
                           <Button
                             variant="outline"
                             size="sm"
@@ -1290,8 +1456,8 @@ export function RecaudacionManagement({
                             Anular
                           </Button>
                         )}
-                        {/* Agente CC: estado FINAL "Gestionado CC" sobre un Aprobado. */}
-                        {isAgente && r.status === 'Aprobado' && (
+                        {/* Agente CC: estado FINAL "Gestionado CC" desde Preaprobado o Aprobado. */}
+                        {isAgente && (r.status === 'Aprobado' || r.status === 'Preaprobado') && (
                           <Button
                             size="sm"
                             className="h-7 text-[10px] bg-emerald-600 text-white hover:bg-emerald-700"
@@ -1299,6 +1465,23 @@ export function RecaudacionManagement({
                           >
                             Gestionado CC
                           </Button>
+                        )}
+                        {/* Track FINANZAS: Recaudación puede aprobar un caso que el
+                            Agente CC ya dejó en Gestionado CC (sin cambiarle el estado). */}
+                        {isRecaudacion && r.status === 'GestionadoCC' && !r.financeApproved && (
+                          <Button
+                            size="sm"
+                            className="h-7 text-[10px] bg-jetsmart-blue text-white hover:opacity-90"
+                            onClick={() => onProcessAction(r.id, 'Aprobar')}
+                          >
+                            Aprobar (Finanzas)
+                          </Button>
+                        )}
+                        {/* Badge del track de Finanzas (independiente del estado CC). */}
+                        {r.financeApproved && (
+                          <Badge className="border-emerald-200 bg-emerald-100 text-emerald-700">
+                            ✓ Aprobado Finanzas
+                          </Badge>
                         )}
                         {/* Recaudación/Admin puede REVERSAR un Aprobado o un Gestionado CC
                             (la reversa de Recaudación prima sobre el Gestionado del agente;
@@ -1323,6 +1506,8 @@ export function RecaudacionManagement({
           </table>
         </div>
       </Card>
+        </>
+      )}
 
       {/* Modal para ver PNRs */}
       {/* Modal Ver tiempos por etapa */}

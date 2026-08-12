@@ -5,13 +5,18 @@ import * as XLSX from 'xlsx';
 
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
-import { BankAccount } from '@/types';
+import { TableLoadingRow } from '@/components/ui/loading-row';
+import { BankAccount, UserRole } from '@/types';
 
 interface BankAccountManagementProps {
   accounts: BankAccount[];
   onAddAccount: (account: BankAccount) => void | Promise<void>;
   onUpdateAccount: (account: BankAccount) => void | Promise<void>;
   onDeleteAccount: (id: string) => void;
+  /** Rol activo: solo Administrador gestiona cuentas; el resto solo consulta. */
+  userRole?: UserRole;
+  /** Carga inicial de datos maestros en curso (para mostrar indicador). */
+  loading?: boolean;
 }
 
 type AccountImportRow = {
@@ -19,19 +24,54 @@ type AccountImportRow = {
   NumeroCuenta?: string;
   Pais?: string;
   Moneda?: string;
+  Decimales?: string | number;
   TaxID?: string;
   RazonSocial?: string;
 };
 
-const countryOptions = ['Chile', 'Peru', 'Colombia'];
-const currencyOptions = ['CLP', 'USD', 'PEN', 'COP'];
+const countryOptions = [
+  'Chile',
+  'Peru',
+  'Colombia',
+  'Argentina',
+  'Uruguay',
+  'República Dominicana',
+  'México',
+  'Venezuela',
+  'Paraguay',
+  'Brasil',
+  'Estados Unidos',
+];
+// Monedas permitidas POR PAÍS: la moneda local + USD (transversal). Así no se puede
+// registrar, por ejemplo, una cuenta en Chile con PEN.
+const countryCurrencies: Record<string, string[]> = {
+  Chile: ['CLP', 'USD'],
+  Peru: ['PEN', 'USD'],
+  Colombia: ['COP', 'USD'],
+  Argentina: ['ARS', 'USD'],
+  Uruguay: ['UYU', 'USD'],
+  'República Dominicana': ['DOP', 'USD'],
+  México: ['MXN', 'USD'],
+  Venezuela: ['VES', 'USD'],
+  Paraguay: ['PYG', 'USD'],
+  Brasil: ['BRL', 'USD'],
+  'Estados Unidos': ['USD'],
+};
+
+const currenciesFor = (country: string) => countryCurrencies[country] ?? ['USD'];
 
 export function BankAccountManagement({
   accounts,
   onAddAccount,
   onUpdateAccount,
   onDeleteAccount,
+  userRole,
+  loading = false,
 }: BankAccountManagementProps) {
+  // Solo el Administrador puede crear/editar/desactivar cuentas (la API lo exige).
+  // Los demás roles con acceso a la pestaña (Recaudación, Cobranza, Contabilidad,
+  // Conciliación, Agente CC) solo consultan la información registrada.
+  const canManage = userRole === 'Administrador';
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const [bankName, setBankName] = useState('');
   const [accountNumber, setAccountNumber] = useState('');
@@ -39,8 +79,11 @@ export function BankAccountManagement({
   const [currency, setCurrency] = useState('CLP');
   const [taxId, setTaxId] = useState('');
   const [legalName, setLegalName] = useState('');
+  const [decimals, setDecimals] = useState(0);
   const [editingAccount, setEditingAccount] = useState<BankAccount | null>(null);
   const [importMessage, setImportMessage] = useState('');
+
+  const decimalOptions = [0, 1, 2, 3, 4];
 
   const resetForm = () => {
     setBankName('');
@@ -49,6 +92,7 @@ export function BankAccountManagement({
     setCurrency('CLP');
     setTaxId('');
     setLegalName('');
+    setDecimals(0);
   };
 
   const handleAdd = async () => {
@@ -59,6 +103,7 @@ export function BankAccountManagement({
       accountNumber,
       country,
       currency,
+      decimalPlaces: decimals,
       taxId,
       legalName,
       isActive: true,
@@ -70,6 +115,7 @@ export function BankAccountManagement({
     setEditingAccount({
       ...account,
       currency: account.currency ?? 'CLP',
+      decimalPlaces: account.decimalPlaces ?? 0,
       taxId: account.taxId ?? '',
       legalName: account.legalName ?? '',
     });
@@ -88,6 +134,7 @@ export function BankAccountManagement({
         NumeroCuenta: '12345678',
         Pais: 'Chile',
         Moneda: 'CLP',
+        Decimales: 0,
         TaxID: '76.123.456-7',
         RazonSocial: 'Empresa Demo SpA',
       },
@@ -117,6 +164,7 @@ export function BankAccountManagement({
         currency: String(row.Moneda || 'CLP')
           .trim()
           .toUpperCase(),
+        decimalPlaces: Number.isFinite(Number(row.Decimales)) ? Number(row.Decimales) : 0,
         taxId: String(row.TaxID ?? '').trim(),
         legalName: String(row.RazonSocial ?? '').trim(),
         isActive: true,
@@ -129,6 +177,7 @@ export function BankAccountManagement({
 
   return (
     <div className="space-y-6">
+      {canManage && (
       <div className="rounded-lg border bg-white p-4">
         <h3 className="mb-4 text-lg font-semibold">Configuracion de Cuentas Bancarias</h3>
         <div className="grid grid-cols-1 gap-4 md:grid-cols-6 items-end">
@@ -153,7 +202,12 @@ export function BankAccountManagement({
             <select
               className="h-10 w-full rounded-md border bg-white px-3 text-sm"
               value={country}
-              onChange={(e) => setCountry(e.target.value)}
+              onChange={(e) => {
+                const c = e.target.value;
+                setCountry(c);
+                const allowed = currenciesFor(c);
+                if (!allowed.includes(currency)) setCurrency(allowed[0]);
+              }}
             >
               {countryOptions.map((option) => (
                 <option key={option} value={option}>
@@ -169,9 +223,23 @@ export function BankAccountManagement({
               value={currency}
               onChange={(e) => setCurrency(e.target.value)}
             >
-              {currencyOptions.map((option) => (
+              {currenciesFor(country).map((option) => (
                 <option key={option} value={option}>
                   {option}
+                </option>
+              ))}
+            </select>
+          </div>
+          <div className="space-y-2">
+            <label className="text-sm font-medium">Decimales</label>
+            <select
+              className="h-10 w-full rounded-md border bg-white px-3 text-sm"
+              value={decimals}
+              onChange={(e) => setDecimals(Number(e.target.value))}
+            >
+              {decimalOptions.map((option) => (
+                <option key={option} value={option}>
+                  {option === 0 ? '0 (sin decimales)' : option}
                 </option>
               ))}
             </select>
@@ -203,6 +271,7 @@ export function BankAccountManagement({
         </div>
         {importMessage && <p className="mt-3 text-sm text-slate-600">{importMessage}</p>}
       </div>
+      )}
 
       <div className="rounded-lg border bg-white overflow-hidden">
         <table className="w-full text-left text-sm">
@@ -213,6 +282,7 @@ export function BankAccountManagement({
               <th className="px-4 py-3">Numero</th>
               <th className="px-4 py-3">Pais</th>
               <th className="px-4 py-3">Moneda</th>
+              <th className="px-4 py-3">Decimales</th>
               <th className="px-4 py-3">Tax ID</th>
               <th className="px-4 py-3">Razon social</th>
               <th className="px-4 py-3">Estado</th>
@@ -220,9 +290,11 @@ export function BankAccountManagement({
             </tr>
           </thead>
           <tbody>
-            {accounts.length === 0 ? (
+            {loading ? (
+              <TableLoadingRow colSpan={10} label="Cargando cuentas…" />
+            ) : accounts.length === 0 ? (
               <tr>
-                <td colSpan={9} className="px-4 py-8 text-center text-slate-500 italic">
+                <td colSpan={10} className="px-4 py-8 text-center text-slate-500 italic">
                   No hay cuentas registradas.
                 </td>
               </tr>
@@ -234,24 +306,39 @@ export function BankAccountManagement({
                   <td className="px-4 py-3">{account.accountNumber}</td>
                   <td className="px-4 py-3">{account.country}</td>
                   <td className="px-4 py-3">{account.currency || '-'}</td>
+                  <td className="px-4 py-3">{account.decimalPlaces ?? 0}</td>
                   <td className="px-4 py-3">{account.taxId || '-'}</td>
                   <td className="px-4 py-3">{account.legalName || '-'}</td>
                   <td className="px-4 py-3">
                     {account.isActive === false ? 'Inactiva' : 'Activa'}
                   </td>
                   <td className="px-4 py-3 text-right space-x-2">
-                    <Button variant="outline" size="sm" onClick={() => startEdit(account)}>
-                      Modificar
-                    </Button>
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      className="text-red-600 hover:text-red-700"
-                      onClick={() => onDeleteAccount(account.id)}
-                      disabled={account.isActive === false}
-                    >
-                      Desactivar
-                    </Button>
+                    {canManage ? (
+                      <>
+                        <Button variant="outline" size="sm" onClick={() => startEdit(account)}>
+                          Modificar
+                        </Button>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          className="text-red-600 hover:text-red-700"
+                          onClick={() => {
+                            if (
+                              window.confirm(
+                                `¿Desactivar la cuenta ${account.bankName} - ${account.accountNumber}? Dejará de estar disponible para nuevas cargas y validaciones.`
+                              )
+                            ) {
+                              onDeleteAccount(account.id);
+                            }
+                          }}
+                          disabled={account.isActive === false}
+                        >
+                          Desactivar
+                        </Button>
+                      </>
+                    ) : (
+                      <span className="text-[11px] text-slate-400">Solo consulta</span>
+                    )}
                   </td>
                 </tr>
               ))
@@ -289,7 +376,17 @@ export function BankAccountManagement({
               <select
                 className="h-10 w-full rounded-md border bg-white px-3 text-sm"
                 value={editingAccount.country}
-                onChange={(e) => setEditingAccount({ ...editingAccount, country: e.target.value })}
+                onChange={(e) => {
+                  const c = e.target.value;
+                  const allowed = currenciesFor(c);
+                  setEditingAccount({
+                    ...editingAccount,
+                    country: c,
+                    currency: allowed.includes(editingAccount.currency ?? '')
+                      ? editingAccount.currency
+                      : allowed[0],
+                  });
+                }}
               >
                 {countryOptions.map((option) => (
                   <option key={option} value={option}>
@@ -305,9 +402,25 @@ export function BankAccountManagement({
                 value={editingAccount.currency ?? 'CLP'}
                 onChange={(e) => setEditingAccount({ ...editingAccount, currency: e.target.value })}
               >
-                {currencyOptions.map((option) => (
+                {currenciesFor(editingAccount.country ?? 'Chile').map((option) => (
                   <option key={option} value={option}>
                     {option}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div className="space-y-2">
+              <label className="text-sm font-medium">Decimales</label>
+              <select
+                className="h-10 w-full rounded-md border bg-white px-3 text-sm"
+                value={editingAccount.decimalPlaces ?? 0}
+                onChange={(e) =>
+                  setEditingAccount({ ...editingAccount, decimalPlaces: Number(e.target.value) })
+                }
+              >
+                {decimalOptions.map((option) => (
+                  <option key={option} value={option}>
+                    {option === 0 ? '0 (sin decimales)' : option}
                   </option>
                 ))}
               </select>

@@ -3,13 +3,13 @@ import { getServerSession } from 'next-auth';
 import { z } from 'zod';
 
 import { auditAction } from '@/lib/audit';
-import { authOptions } from '@/lib/auth';
+import { authOptions, getAppSession } from '@/lib/auth';
 import { resetUserPassword } from '@/lib/user-store';
 
 /** Restablece la contraseña de un usuario (solo Administrador). Genera una
  *  temporal, fuerza cambio en el próximo login y audita la acción. */
 export async function POST(request: Request) {
-  const session = await getServerSession(authOptions);
+  const session = await getAppSession();
   const role = session?.user?.role ?? session?.roles?.[0];
   if (!session?.user?.email) {
     return NextResponse.json({ error: 'No autenticado' }, { status: 401 });

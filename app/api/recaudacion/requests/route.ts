@@ -3,7 +3,7 @@ import { getServerSession } from 'next-auth';
 import { z } from 'zod';
 
 import { auditAction } from '@/lib/audit';
-import { authOptions } from '@/lib/auth';
+import { authOptions, getAppSession } from '@/lib/auth';
 import { canApproveRecaudacion, canRead, canWrite, RECAUDACION_APPROVAL_STATUSES } from '@/lib/authz';
 import {
   collectionToUi,
@@ -37,8 +37,11 @@ const requestSchema = z.object({
     'GestionadoCC',
     'Anulado',
   ]),
+  // Track de FINANZAS (Recaudación), independiente del status.
+  financeApproved: z.boolean().optional(),
   rejectionComment: z.string().optional(),
   authorizationCode: z.string().trim().optional(),
+  quotationId: z.string().trim().optional(),
   infoRequestComment: z.string().optional(),
   attachmentIds: z.array(z.string()).optional(),
   associatedMovementId: z.string().optional(),
@@ -53,7 +56,7 @@ const payloadSchema = z.object({
 });
 
 export async function GET() {
-  const session = await getServerSession(authOptions);
+  const session = await getAppSession();
   if (!session?.user?.email) {
     return NextResponse.json({ error: 'No autenticado' }, { status: 401 });
   }
@@ -64,7 +67,15 @@ export async function GET() {
   // Devolvemos TODAS (incluidas anuladas). El filtro de Estado del cliente decide
   // si se muestran o no; por defecto la vista las oculta.
   const requests = await prisma.collectionRequest.findMany({
-    include: { supportFile: true, items: true, attachments: true },
+    include: {
+      supportFile: true,
+      items: true,
+      attachments: true,
+      // D 2c: traemos displayId+bank del movimiento asociado para mostrar el
+      // vinculo sin depender de la lista completa de movimientos en el cliente.
+      associatedMovement: { select: { displayId: true, bank: true } },
+      createdBy: { select: { name: true, email: true } },
+    },
     orderBy: [{ createdAt: 'desc' }],
   });
 
@@ -72,7 +83,7 @@ export async function GET() {
 }
 
 export async function PUT(request: Request) {
-  const session = await getServerSession(authOptions);
+  const session = await getAppSession();
   if (!session?.user?.email) {
     return NextResponse.json({ error: 'No autenticado' }, { status: 401 });
   }
@@ -93,13 +104,16 @@ export async function PUT(request: Request) {
     const incomingIds = parsed.data.requests.map((item) => item.id);
     const existing = await prisma.collectionRequest.findMany({
       where: { id: { in: incomingIds.length > 0 ? incomingIds : [''] } },
-      select: { id: true, status: true },
+      select: { id: true, status: true, financeApproved: true },
     });
     const previousStatusById = new Map(existing.map((item) => [item.id, item.status]));
+    const previousFinanceById = new Map(existing.map((item) => [item.id, item.financeApproved]));
     const attemptsApproval = parsed.data.requests.some(
       (item) =>
-        RECAUDACION_APPROVAL_STATUSES.includes(item.status) &&
-        previousStatusById.get(item.id) !== item.status
+        (RECAUDACION_APPROVAL_STATUSES.includes(item.status) &&
+          previousStatusById.get(item.id) !== item.status) ||
+        // Aprobación de Finanzas (marca nueva) también es acción restringida.
+        (item.financeApproved === true && previousFinanceById.get(item.id) !== true)
     );
     if (attemptsApproval) {
       return NextResponse.json(
@@ -278,6 +292,7 @@ export async function PUT(request: Request) {
       select: {
         id: true,
         status: true,
+        financeApproved: true,
         associatedMovementId: true,
         rejectionComment: true,
         amount: true,
@@ -336,6 +351,15 @@ export async function PUT(request: Request) {
           ? nowTs
           : undefined;
 
+      // Track de FINANZAS: al pasar a aprobado se sella fecha+usuario; al quitarlo
+      // (reversa/rechazo) se limpia. Independiente del status (track CC).
+      const financeData =
+        item.financeApproved === true
+          ? previous?.financeApproved === true
+            ? { financeApproved: true }
+            : { financeApproved: true, financeApprovedAt: nowTs, financeApprovedById: session.user.id }
+          : { financeApproved: false, financeApprovedAt: null, financeApprovedById: null };
+
       const supportFile = item.supportFileName
         ? await tx.supportFile.create({
             data: {
@@ -355,9 +379,11 @@ export async function PUT(request: Request) {
           clientId: item.clientId,
           supportFileId: supportFile?.id,
           status: item.status,
+          ...financeData,
           associatedMovementId: associatedMovement?.id,
           rejectionComment: item.rejectionComment,
           authorizationCode: item.authorizationCode ?? null,
+          quotationId: item.quotationId ?? null,
           infoRequestComment: item.infoRequestComment ?? null,
           infoRequestedAt,
           preapprovedAt,
@@ -378,9 +404,11 @@ export async function PUT(request: Request) {
           clientId: item.clientId,
           supportFileId: supportFile?.id,
           status: item.status,
+          ...financeData,
           associatedMovementId: associatedMovement?.id,
           rejectionComment: item.rejectionComment,
           authorizationCode: item.authorizationCode ?? null,
+          quotationId: item.quotationId ?? null,
           infoRequestComment: item.infoRequestComment ?? null,
           infoRequestedAt,
           preapprovedAt,
@@ -409,6 +437,7 @@ export async function PUT(request: Request) {
       // vuelve a pedir información. Elimina la divergencia cartola↔recaudación.
       if (associatedMovement) {
         const reconciling =
+          item.financeApproved === true ||
           item.status === 'Preaprobado' ||
           item.status === 'Aprobado' ||
           item.status === 'GestionadoCC';

@@ -1,7 +1,7 @@
 'use client';
 
 import { useSession } from 'next-auth/react';
-import { useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import * as XLSX from 'xlsx';
 import { z } from 'zod';
 
@@ -10,19 +10,22 @@ import { formatDate } from '@/lib/format';
 import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
+import { SearchableSelect } from '@/components/ui/searchable-select';
 import {
+  Adquiriente,
   BankAccount,
   CartolaDocument,
   CartolaMovement,
   Client,
   MainIdentificationType,
+  SalesChannel,
 } from '@/types';
 
 interface BankStatementManagementProps {
   availableAccounts: BankAccount[];
   clients: Client[];
-  movements: CartolaMovement[];
-  setMovements: React.Dispatch<React.SetStateAction<CartolaMovement[]>>;
+  /** Adquirientes activos (para identificar abonos como Adquiriente). */
+  adquirientes?: Adquiriente[];
   /** Carga inicial de datos en curso (para mostrar indicador de carga). */
   loading?: boolean;
 }
@@ -34,6 +37,15 @@ const mainIdentificationMap: Record<MainIdentificationType, string> = {
   'Cobranza crédito': 'IDN-CC',
   'Abono débito': 'IDN-AD',
 };
+
+// Canales de venta (fijos) con etiquetas legibles para el Adquiriente.
+const SALES_CHANNELS: { value: SalesChannel; label: string }[] = [
+  { value: 'GDS', label: 'GDS' },
+  { value: 'VentaAeropuerto', label: 'Venta aeropuerto' },
+  { value: 'VentaWeb', label: 'Venta web' },
+];
+const salesChannelLabel = (v?: SalesChannel | null) =>
+  SALES_CHANNELS.find((c) => c.value === v)?.label ?? '';
 
 const csvHeaders = [
   'Monto',
@@ -103,28 +115,37 @@ const cartolaSchema = z.object({
 
 const documentDetailsUploadSchema = z.object({
   MovimientoID: z.string().min(1),
-  Referencia: z.string().min(1),
-  Monto: z.coerce.number().positive(),
+  // Referencia/Monto son obligatorios para tipos con documentos (GC/Cobranza/etc.)
+  // pero NO para Adquiriente (se valida por tipo en el procesamiento).
+  Referencia: z.string().optional().default(''),
+  Monto: z.coerce.number().optional(),
   Detalle: z.string().optional().default(''),
   TipoPrincipal: z
     .enum(['Sin identificar', 'Adquiriente', 'GC', 'Cobranza crédito', 'Abono débito'])
     .default('Sin identificar'),
+  // Solo aplican cuando TipoPrincipal = Adquiriente.
+  Adquiriente: z.string().optional().default(''),
+  Canal: z.string().optional().default(''),
 });
 
 function generateId(prefix: string): string {
   const random = Math.random().toString(36).slice(2, 8).toUpperCase();
   return `${prefix}-${Date.now()}-${random}`;
 }
-const ITEMS_PER_PAGE = 20; // filas por página en la tabla de Cartola (ajústalo si quieres)
+const ITEMS_PER_PAGE = 100; // D 3a: tamaño de página server-side (máx 200 en el GET)
 
 export function BankStatementManagement({
   availableAccounts,
   clients,
-  movements,
-  setMovements,
+  adquirientes = [],
   loading = false,
 }: BankStatementManagementProps) {
   const { data: session } = useSession();
+  // Adquirientes activos, para el selector al identificar abonos.
+  const activeAdquirientes = useMemo(
+    () => adquirientes.filter((a) => a.isActive !== false),
+    [adquirientes]
+  );
   const [selectedMovementId, setSelectedMovementId] = useState<string | null>(null);
   const [uploadError, setUploadError] = useState<string | null>(null);
   const [uploadOkMessage, setUploadOkMessage] = useState<string | null>(null);
@@ -137,9 +158,111 @@ export function BankStatementManagement({
   const [accountFilter, setAccountFilter] = useState<string>('all');
   const [countryFilter, setCountryFilter] = useState<string>('all');
   const [typeFilter, setTypeFilter] = useState<string>('all');
+  const [dateFromFilter, setDateFromFilter] = useState<string>('');
+  const [dateToFilter, setDateToFilter] = useState<string>('');
+  const [searchFilter, setSearchFilter] = useState<string>('');
+  // Ordenamiento server-side de la tabla de movimientos.
+  type SortField = 'date' | 'amount' | 'bank' | 'descripcion' | 'tipo';
+  const [sortBy, setSortBy] = useState<SortField>('date');
+  const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc');
+  const toggleSort = (field: SortField) => {
+    if (sortBy === field) {
+      setSortDir((d) => (d === 'asc' ? 'desc' : 'asc'));
+    } else {
+      setSortBy(field);
+      setSortDir('desc');
+    }
+    setCurrentPage(1);
+  };
+  const sortIcon = (field: SortField) => (sortBy === field ? (sortDir === 'asc' ? ' ▲' : ' ▼') : '');
+
+  // Edición de valores de movimiento (solo "Sin identificar").
+  const [editMov, setEditMov] = useState<CartolaMovement | null>(null);
+  const [editMovAmount, setEditMovAmount] = useState('');
+  const [editMovDate, setEditMovDate] = useState('');
+  const [editMovDesc, setEditMovDesc] = useState('');
+  const [editMovError, setEditMovError] = useState<string | null>(null);
 
   // Pagination state
   const [currentPage, setCurrentPage] = useState(1);
+
+  // D 3a: datos paginados desde el servidor (no dependemos del array completo).
+  const [serverRows, setServerRows] = useState<CartolaMovement[]>([]);
+  const [serverTotal, setServerTotal] = useState(0);
+  const [serverUnidentified, setServerUnidentified] = useState(0);
+  const [serverLoading, setServerLoading] = useState(false);
+  const reloadTokenRef = useRef(0);
+
+  const loadPage = useCallback(async () => {
+    const params = new URLSearchParams();
+    params.set('pageSize', String(ITEMS_PER_PAGE));
+    params.set('page', String(currentPage));
+    if (bankFilter !== 'all') params.set('bank', bankFilter);
+    if (accountFilter !== 'all') params.set('account', accountFilter);
+    if (countryFilter !== 'all') params.set('country', countryFilter);
+    if (typeFilter !== 'all') params.set('identification', typeFilter);
+    if (dateFromFilter) params.set('dateFrom', dateFromFilter);
+    if (dateToFilter) params.set('dateTo', dateToFilter);
+    const q = searchFilter.trim();
+    if (q) params.set('search', q);
+    params.set('sortBy', sortBy);
+    params.set('sortDir', sortDir);
+    const token = ++reloadTokenRef.current;
+    setServerLoading(true);
+    try {
+      const res = await fetch(`/api/cartola/movements?${params.toString()}`, { cache: 'no-store' });
+      if (!res.ok) return;
+      const data = (await res.json()) as {
+        movements: CartolaMovement[];
+        total?: number;
+        unidentifiedTotal?: number;
+      };
+      if (token !== reloadTokenRef.current) return; // respuesta obsoleta, la ignoramos
+      setServerRows(data.movements ?? []);
+      setServerTotal(data.total ?? data.movements?.length ?? 0);
+      setServerUnidentified(data.unidentifiedTotal ?? 0);
+    } catch {
+      // silencioso: se puede reintentar cambiando filtros/página
+    } finally {
+      if (token === reloadTokenRef.current) setServerLoading(false);
+    }
+  }, [
+    bankFilter,
+    accountFilter,
+    countryFilter,
+    typeFilter,
+    dateFromFilter,
+    dateToFilter,
+    searchFilter,
+    sortBy,
+    sortDir,
+    currentPage,
+  ]);
+
+  // Carga (con pequeño debounce para la búsqueda) al cambiar filtros/página.
+  useEffect(() => {
+    const t = window.setTimeout(() => {
+      void loadPage();
+    }, 250);
+    return () => window.clearTimeout(t);
+  }, [loadPage]);
+
+  // D 3b: persiste 1+ movimientos POR REGISTRO reutilizando el PUT existente.
+  // knownIds = solo estos ids => la reversa (knownIds - payload) queda vacía, así
+  // que no toca ningún otro movimiento. Permite escribir sin cargar todo el array.
+  const persistMovements = useCallback(async (list: CartolaMovement[]) => {
+    if (list.length === 0) return true;
+    try {
+      const res = await fetch('/api/cartola/movements', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ movements: list, knownIds: list.map((m) => m.movementId) }),
+      });
+      return res.ok;
+    } catch {
+      return false;
+    }
+  }, []);
 
   // Modal states
   const [isMovementModalOpen, setIsMovementModalOpen] = useState(false);
@@ -163,6 +286,9 @@ export function BankStatementManagement({
   const [manualDocumentAmount, setManualDocumentAmount] = useState('');
   const [manualDocuments, setManualDocuments] = useState<CartolaDocument[]>([]);
   const [manualError, setManualError] = useState<string | null>(null);
+  const [savingManual, setSavingManual] = useState(false);
+  const [savingEdit, setSavingEdit] = useState(false);
+  const [savingUpload, setSavingUpload] = useState(false);
 
   // Edit documents states
   const [editingMovementId, setEditingMovementId] = useState<string | null>(null);
@@ -171,64 +297,89 @@ export function BankStatementManagement({
   const [editDocumentAmount, setEditDocumentAmount] = useState('');
   const [editDocuments, setEditDocuments] = useState<CartolaDocument[]>([]);
   const [editType, setEditType] = useState<MainIdentificationType>('Sin identificar');
+  const [editAdquirienteId, setEditAdquirienteId] = useState<string>('');
+  const [editSalesChannel, setEditSalesChannel] = useState<SalesChannel | ''>('');
   const [editDocumentsError, setEditDocumentsError] = useState<string | null>(null);
 
   const selectedMovement = useMemo(
-    () => movements.find((m) => m.movementId === selectedMovementId),
-    [movements, selectedMovementId]
+    () => serverRows.find((m) => m.movementId === selectedMovementId),
+    [serverRows, selectedMovementId]
   );
+
+  // Formato de montos según la cuenta (moneda + decimales configurados). Busca la
+  // cuenta por número (y banco) para saber cuántos decimales usar. Fallback: CLP, 0.
+  const findAccountFor = (bank: string, accountNumber: string) =>
+    availableAccounts.find((a) => a.accountNumber === accountNumber && a.bankName === bank) ??
+    availableAccounts.find((a) => a.accountNumber === accountNumber);
+
+  const formatAmountFor = (amount: number, bank: string, accountNumber: string) => {
+    const acc = findAccountFor(bank, accountNumber);
+    const decimals = acc?.decimalPlaces ?? 0;
+    const currency = acc?.currency ?? 'CLP';
+    try {
+      return amount.toLocaleString('es-CL', {
+        style: 'currency',
+        currency,
+        minimumFractionDigits: decimals,
+        maximumFractionDigits: decimals,
+      });
+    } catch {
+      return amount.toLocaleString('es-CL', {
+        minimumFractionDigits: decimals,
+        maximumFractionDigits: decimals,
+      });
+    }
+  };
+
+  const formatMovementAmount = (m: CartolaMovement) =>
+    formatAmountFor(m.amount, m.bank, m.bankAccount);
+
+  const adquirienteNameById = (id?: string | null) => {
+    if (!id) return '';
+    const a = adquirientes.find((x) => x.id === id);
+    return a ? `${a.appCode ? `${a.appCode} — ` : ''}${a.name}` : id;
+  };
 
   // Filter options based on loaded data
-  const uniqueBanks = useMemo(() => Array.from(new Set(movements.map((m) => m.bank))), [movements]);
+  const uniqueBanks = useMemo(
+    () => Array.from(new Set(availableAccounts.map((a) => a.bankName))),
+    [availableAccounts]
+  );
   const uniqueAccounts = useMemo(
-    () => Array.from(new Set(movements.map((m) => m.bankAccount))),
-    [movements]
+    () => Array.from(new Set(availableAccounts.map((a) => a.accountNumber))),
+    [availableAccounts]
   );
   const uniqueCountries = useMemo(
-    () => Array.from(new Set(movements.map((m) => m.country))),
-    [movements]
+    () => Array.from(new Set(availableAccounts.map((a) => a.country))),
+    [availableAccounts]
   );
 
-  const filteredMovements = useMemo(() => {
-    return movements.filter((m) => {
-      const matchBank = bankFilter === 'all' || m.bank === bankFilter;
-      const matchAccount = accountFilter === 'all' || m.bankAccount === accountFilter;
-      const matchCountry = countryFilter === 'all' || m.country === countryFilter;
-      const matchType = typeFilter === 'all' || m.mainIdentification === typeFilter;
-      return matchBank && matchAccount && matchCountry && matchType;
-    });
-  }, [movements, bankFilter, accountFilter, countryFilter, typeFilter]);
+  const toIsoDay = (v: string): string => {
+    const raw = String(v ?? '').trim();
+    const ymd = /^(\d{4})-(\d{2})-(\d{2})/.exec(raw);
+    if (ymd) return `${ymd[1]}-${ymd[2]}-${ymd[3]}`;
+    const dmy = /^(\d{2})[/-](\d{2})[/-](\d{4})$/.exec(raw);
+    if (dmy) return `${dmy[3]}-${dmy[2]}-${dmy[1]}`;
+    return raw;
+  };
 
-  const unidentifiedCount = useMemo(
-    () => filteredMovements.filter((m) => m.mainIdentification === 'Sin identificar').length,
-    [filteredMovements]
-  );
+  // D 3a: el servidor ya aplica filtros/orden/paginado; la tabla muestra la página tal cual.
+  const filteredMovements = serverRows;
 
-  const unidentifiedRate = useMemo(
-    () =>
-      filteredMovements.length === 0 ? 0 : (unidentifiedCount / filteredMovements.length) * 100,
-    [filteredMovements.length, unidentifiedCount]
-  );
+  const unidentifiedCount = serverUnidentified;
+  const unidentifiedRate = serverTotal === 0 ? 0 : (serverUnidentified / serverTotal) * 100;
 
-  const prioritizedMovements = useMemo(
-    () =>
-      [...filteredMovements].sort((a, b) => {
-        const aIsUnidentified = a.mainIdentification === 'Sin identificar' ? 0 : 1;
-        const bIsUnidentified = b.mainIdentification === 'Sin identificar' ? 0 : 1;
-        return aIsUnidentified - bIsUnidentified;
-      }),
-    [filteredMovements]
-  );
+  const prioritizedMovements = serverRows;
 
-  // Pagination Logic
-  const totalPages = Math.ceil(prioritizedMovements.length / ITEMS_PER_PAGE);
-  const paginatedMovements = useMemo(() => {
-    const start = (currentPage - 1) * ITEMS_PER_PAGE;
-    return prioritizedMovements.slice(start, start + ITEMS_PER_PAGE);
-  }, [prioritizedMovements, currentPage]);
+  // Pagination Logic (server-side)
+  const totalPages = Math.max(1, Math.ceil(serverTotal / ITEMS_PER_PAGE));
+  const paginatedMovements = serverRows;
 
   // Reset page when filters change
-  useMemo(() => setCurrentPage(1), [bankFilter, accountFilter, countryFilter, typeFilter]);
+  useMemo(
+    () => setCurrentPage(1),
+    [bankFilter, accountFilter, countryFilter, typeFilter, dateFromFilter, dateToFilter, searchFilter]
+  );
 
   const pendingUploadTotalAmount = useMemo(
     () => pendingUploadMovements.reduce((acc, m) => acc + m.amount, 0),
@@ -251,9 +402,22 @@ export function BankStatementManagement({
   };
 
   const onDownloadDetailsTemplate = () => {
-    const headers = ['MovimientoID', 'Referencia', 'Monto', 'Detalle', 'TipoPrincipal'].join(',');
-    const sample = 'CL-BAN-5678-202606-000123,DOC-123,5000,Pago factura,Adquiriente';
-    const blob = new Blob(['\uFEFF' + `${headers}\n${sample}\n`], { type: 'text/csv;charset=utf-8;' });
+    // Los \u00EDtems dependen del tipo: GC / Cobranza cr\u00E9dito \u2192 Referencia (PNR/factura)
+    // + Monto; Adquiriente \u2192 Adquiriente + Canal (sin Referencia/Monto).
+    const headers = [
+      'MovimientoID',
+      'Referencia',
+      'Monto',
+      'Detalle',
+      'TipoPrincipal',
+      'Adquiriente',
+      'Canal',
+    ].join(',');
+    const sampleGC = 'CL-BAN-5678-202606-000123,ABC123,5000,PNR grupo,GC,,';
+    const sampleAdq = 'CL-BAN-5678-202607-000200,,,,Adquiriente,ADQ-000001,Venta web';
+    const blob = new Blob(['\uFEFF' + `${headers}\n${sampleGC}\n${sampleAdq}\n`], {
+      type: 'text/csv;charset=utf-8;',
+    });
     const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
     link.href = url;
@@ -263,11 +427,28 @@ export function BankStatementManagement({
     document.body.removeChild(link);
   };
 
-  const onExportDocumentDetails = () => {
-    // Usa la MISMA lista filtrada que la tabla. Los movimientos CON PNR salen una
-    // fila por PNR; los SIN PNR (no identificados) salen igual con una fila
-    // (Referencia vacía y su monto), para que el export quede completo.
-    const data = prioritizedMovements.flatMap((m) =>
+  // D 3a: para exportar TODO lo filtrado (no solo la página visible), pedimos al
+  // servidor el conjunto completo (GET sin pageSize devuelve todo el filtro).
+  const fetchAllForExport = useCallback(async (): Promise<CartolaMovement[]> => {
+    const params = new URLSearchParams();
+    if (bankFilter !== 'all') params.set('bank', bankFilter);
+    if (accountFilter !== 'all') params.set('account', accountFilter);
+    if (countryFilter !== 'all') params.set('country', countryFilter);
+    if (typeFilter !== 'all') params.set('identification', typeFilter);
+    if (dateFromFilter) params.set('dateFrom', dateFromFilter);
+    if (dateToFilter) params.set('dateTo', dateToFilter);
+    const q = searchFilter.trim();
+    if (q) params.set('search', q);
+    const res = await fetch(`/api/cartola/movements?${params.toString()}`, { cache: 'no-store' });
+    if (!res.ok) return [];
+    const data = (await res.json()) as { movements?: CartolaMovement[] };
+    return data.movements ?? [];
+  }, [bankFilter, accountFilter, countryFilter, typeFilter, dateFromFilter, dateToFilter, searchFilter]);
+
+  const onExportDocumentDetails = async () => {
+    // Exporta TODO el conjunto filtrado (no solo la página visible).
+    const rows = await fetchAllForExport();
+    const data = rows.flatMap((m) =>
       m.documents.length > 0
         ? m.documents.map((d) => ({
             MovimientoID: m.displayId || m.movementId,
@@ -296,15 +477,31 @@ export function BankStatementManagement({
     XLSX.writeFile(wb, 'detalle_documentos_smarty.xlsx');
   };
 
-  const onExportMovements = () => {
-    const data = prioritizedMovements.map((m) => ({
-      ID: m.displayId || m.movementId,
-      Banco: m.bank,
-      Cuenta: m.bankAccount,
-      Monto: m.amount,
-      Fecha: formatDate(m.date),
-      Tipo: m.mainIdentification,
-    }));
+  const onExportMovements = async () => {
+    const rows = await fetchAllForExport();
+    const data = rows.map((m) => {
+      const acc = findAccountFor(m.bank, m.bankAccount);
+      return {
+        ID: m.displayId || m.movementId,
+        Banco: m.bank,
+        Cuenta: m.bankAccount,
+        Pais: m.country,
+        Moneda: acc?.currency ?? '',
+        Monto: m.amount,
+        Fecha: formatDate(m.date),
+        Tipo: m.mainIdentification,
+        Adquiriente: adquirienteNameById(m.adquirienteId),
+        Canal: salesChannelLabel(m.salesChannel),
+        Descripcion: m.description,
+        Adicional_1: m.extraFields?.[0] ?? '',
+        Adicional_2: m.extraFields?.[1] ?? '',
+        Adicional_3: m.extraFields?.[2] ?? '',
+        Adicional_4: m.extraFields?.[3] ?? '',
+        Adicional_5: m.extraFields?.[4] ?? '',
+        Documentos:
+          m.documents?.map((d) => `${d.reference} (${d.amount})`).join(' | ') ?? '',
+      };
+    });
     const ws = XLSX.utils.json_to_sheet(data);
     const wb = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb, ws, 'Movimientos');
@@ -397,65 +594,132 @@ export function BankStatementManagement({
           {} as Record<string, typeof parsedRows>
         );
 
-        setMovements((prev) => {
-          const nextMovements = [...prev];
+        // Fase 5: ya no dependemos del array compartido. Buscamos los movimientos
+        // referenciados en el servidor (por id o displayId), validamos y persistimos
+        // por registro con el PUT (persistMovements) igual que el resto de Cartola.
+        const movIds = Object.keys(groupedByMov);
+        const lookupRes = await fetch('/api/cartola/movements/lookup', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ ids: movIds }),
+        });
+        if (!lookupRes.ok) {
+          throw new Error('No fue posible consultar los movimientos en el servidor.');
+        }
+        const lookupData = (await lookupRes.json()) as { movements: CartolaMovement[] };
+        const foundList = lookupData.movements ?? [];
+        const findMov = (id: string) =>
+          foundList.find((m) => m.movementId === id || m.displayId === id);
 
-          for (const movId in groupedByMov) {
-            const details = groupedByMov[movId]!;
-            const movement = nextMovements.find((m) => m.movementId === movId || m.displayId === movId);
+        const round2 = (n: number) => Math.round(n * 100) / 100;
+        const updatedList: CartolaMovement[] = [];
 
-            if (!movement) throw new Error(`El MovimientoID ${movId} no existe.`);
+        for (const movId of movIds) {
+          const details = groupedByMov[movId]!;
+          const movement = findMov(movId);
+          if (!movement) throw new Error(`El MovimientoID ${movId} no existe.`);
 
-            // 1. Validar Tipo Único
-            const firstType = details[0]!.TipoPrincipal;
-            if (details.some((d) => d.TipoPrincipal !== firstType)) {
-              throw new Error(
-                `Inconsistencia en ID ${movId}: Múltiples tipos principales detectados.`
-              );
-            }
-
-            // Abono débito: el detalle referencia clientes registrados (navitaireCode o appCode).
-            if (firstType === 'Abono débito') {
-              const clientCodes = new Set(
-                clients
-                  .flatMap((c) => [c.navitaireCode, c.appCode])
-                  .filter((x): x is string => !!x)
-                  .map((x) => x.toUpperCase())
-              );
-              for (const d of details) {
-                if (!clientCodes.has(String(d.Referencia).toUpperCase())) {
-                  throw new Error(
-                    `Movimiento ${movId}: el código "${d.Referencia}" (Abono débito) no corresponde a un cliente registrado.`
-                  );
-                }
-              }
-            }
-
-            // 2. Validar Cuadratura de Montos (redondeo a 2 decimales + tolerancia de $0.01)
-            const round2 = (n: number) => Math.round(n * 100) / 100;
-            const totalDetails = round2(details.reduce((sum, d) => sum + d.Monto, 0));
-            if (Math.abs(totalDetails - round2(movement.amount)) > 0.01) {
-              throw new Error(
-                `Cuadratura fallida en ID ${movId}: Cartola $${movement.amount} vs detalle $${totalDetails}.`
-              );
-            }
-
-            // 3. Limpiar y Reemplazar (Previene duplicados)
-            movement.documents = details.map((d) => ({
-              id: generateId('DOC'),
-              reference: d.Referencia,
-              amount: d.Monto,
-              detail: d.Detalle,
-            }));
-            movement.mainIdentification = firstType;
-            movement.mainIdentificationId = mainIdentificationMap[firstType];
+          // 1. Validar Tipo Único
+          const firstType = details[0]!.TipoPrincipal;
+          if (details.some((d) => d.TipoPrincipal !== firstType)) {
+            throw new Error(
+              `Inconsistencia en ID ${movId}: Múltiples tipos principales detectados.`
+            );
           }
 
-          return nextMovements;
-        });
-        setUploadOkMessage(
-          `Carga exitosa. Se actualizaron ${Object.keys(groupedByMov).length} movimientos.`
-        );
+          // Adquiriente: se identifica por adquiriente + canal (sin PNR/Monto).
+          if (firstType === 'Adquiriente') {
+            const first = details[0]!;
+            const key = first.Adquiriente.trim().toUpperCase();
+            const adq = key
+              ? activeAdquirientes.find((a) =>
+                  [a.appCode, a.taxId, a.sapBP, a.name, a.id]
+                    .filter((v): v is string => !!v)
+                    .some((v) => v.trim().toUpperCase() === key)
+                )
+              : undefined;
+            if (!adq) {
+              throw new Error(
+                `Movimiento ${movId}: Adquiriente "${first.Adquiriente}" no está registrado.`
+              );
+            }
+            const chNorm = first.Canal.trim().toLowerCase();
+            const channel = SALES_CHANNELS.find(
+              (c) => c.value.toLowerCase() === chNorm || c.label.toLowerCase() === chNorm
+            )?.value;
+            if (!channel) {
+              throw new Error(
+                `Movimiento ${movId}: Canal "${first.Canal}" inválido (usa GDS / Venta aeropuerto / Venta web).`
+              );
+            }
+            updatedList.push({
+              ...movement,
+              documents: [],
+              mainIdentification: 'Adquiriente',
+              mainIdentificationId: mainIdentificationMap['Adquiriente'],
+              adquirienteId: adq.id,
+              salesChannel: channel,
+            });
+            continue;
+          }
+
+          // Tipos con documentos (GC/Cobranza/Abono/Sin identificar): Referencia y
+          // Monto son obligatorios en cada fila.
+          for (const d of details) {
+            if (!d.Referencia.trim() || d.Monto === undefined) {
+              throw new Error(
+                `Movimiento ${movId}: cada detalle requiere Referencia y Monto (tipo ${firstType}).`
+              );
+            }
+          }
+
+          // Abono débito: el detalle referencia clientes registrados (navitaireCode o appCode).
+          if (firstType === 'Abono débito') {
+            const clientCodes = new Set(
+              clients
+                .flatMap((c) => [c.navitaireCode, c.appCode])
+                .filter((x): x is string => !!x)
+                .map((x) => x.toUpperCase())
+            );
+            for (const d of details) {
+              if (!clientCodes.has(String(d.Referencia).toUpperCase())) {
+                throw new Error(
+                  `Movimiento ${movId}: el código "${d.Referencia}" (Abono débito) no corresponde a un cliente registrado.`
+                );
+              }
+            }
+          }
+
+          // 2. Validar Cuadratura de Montos (redondeo a 2 decimales + tolerancia de $0.01)
+          const totalDetails = round2(details.reduce((sum, d) => sum + (d.Monto ?? 0), 0));
+          if (Math.abs(totalDetails - round2(movement.amount)) > 0.01) {
+            throw new Error(
+              `Cuadratura fallida en ID ${movId}: Cartola $${movement.amount} vs detalle $${totalDetails}.`
+            );
+          }
+
+          // 3. Limpiar y Reemplazar (Previene duplicados)
+          updatedList.push({
+            ...movement,
+            documents: details.map((d) => ({
+              id: generateId('DOC'),
+              reference: d.Referencia,
+              amount: d.Monto ?? 0,
+              detail: d.Detalle,
+            })),
+            mainIdentification: firstType,
+            mainIdentificationId: mainIdentificationMap[firstType],
+            adquirienteId: null,
+            salesChannel: null,
+          });
+        }
+
+        const okDetails = await persistMovements(updatedList);
+        if (!okDetails) {
+          throw new Error('No fue posible guardar los detalles en el servidor.');
+        }
+        setUploadOkMessage(`Carga exitosa. Se actualizaron ${updatedList.length} movimientos.`);
+        window.setTimeout(() => void loadPage(), 800);
       }
 
       setPendingUploadFileName(file.name);
@@ -471,39 +735,136 @@ export function BankStatementManagement({
     }
   };
 
-  const onConfirmMassUpload = () => {
-    if (pendingUploadMovements.length === 0) return;
-    setMovements((prev) => [...pendingUploadMovements, ...prev]);
-    setUploadOkMessage(`Carga exitosa: ${pendingUploadMovements.length} movimientos creados.`);
-    setPendingUploadMovements([]);
-    setPendingUploadFileName(null);
+  const onConfirmMassUpload = async () => {
+    if (pendingUploadMovements.length === 0 || savingUpload) return;
+    setSavingUpload(true);
+    try {
+      const ok = await persistMovements(pendingUploadMovements);
+      if (!ok) {
+        setUploadError('No fue posible guardar la carga en el servidor.');
+        return;
+      }
+      setUploadOkMessage(`Carga exitosa: ${pendingUploadMovements.length} movimientos creados.`);
+      setPendingUploadMovements([]);
+      setPendingUploadFileName(null);
+      setCurrentPage(1);
+      void loadPage();
+    } finally {
+      setSavingUpload(false);
+    }
   };
 
-  const onDeleteMovement = (movementId: string) => {
-    const target = movements.find((m) => m.movementId === movementId);
-    if (target && target.mainIdentification !== 'Sin identificar') {
-      setUploadError('No se puede eliminar un movimiento ya identificado/conciliado.');
+  const openEditMov = (m: CartolaMovement) => {
+    const role = session?.user?.role;
+    const canTouchClosed = role === 'Administrador' || role === 'Contabilidad';
+    if (m.closeState === 'CerradoDefinitivo' && !canTouchClosed) {
+      setUploadError('Movimiento CERRADO contablemente. Solo Contabilidad puede editarlo.');
       return;
     }
+    setEditMovError(null);
+    setEditMov(m);
+    setEditMovAmount(String(m.amount));
+    setEditMovDate(m.date);
+    setEditMovDesc(m.description);
+  };
 
-    setMovements((prev) => prev.filter((m) => m.movementId !== movementId));
+  const onSaveMovEdit = async () => {
+    if (!editMov || savingEdit) return;
+    setEditMovError(null);
+    const amount = Number(editMovAmount);
+    if (!Number.isFinite(amount) || amount <= 0) {
+      setEditMovError('El monto debe ser un número positivo.');
+      return;
+    }
+    if (!editMovDate) {
+      setEditMovError('Indica la fecha.');
+      return;
+    }
+    if (!editMovDesc.trim()) {
+      setEditMovError('La descripción es obligatoria.');
+      return;
+    }
+    const updated: CartolaMovement = {
+      ...editMov,
+      amount,
+      date: editMovDate,
+      description: editMovDesc.trim(),
+    };
+    setSavingEdit(true);
+    try {
+      const ok = await persistMovements([updated]);
+      if (!ok) {
+        setEditMovError('No fue posible guardar el cambio en el servidor.');
+        return;
+      }
+      setEditMov(null);
+      void loadPage();
+    } finally {
+      setSavingEdit(false);
+    }
+  };
+
+  const onDeleteMovement = async (movementId: string) => {
+    const target = serverRows.find((m) => m.movementId === movementId);
+    // Gate de cierre contable: un movimiento CerradoDefinitivo solo lo puede
+    // anular/reversar Contabilidad o Administrador.
+    const role = session?.user?.role;
+    const canTouchClosed = role === 'Administrador' || role === 'Contabilidad';
+    if (target?.closeState === 'CerradoDefinitivo' && !canTouchClosed) {
+      setUploadError(
+        'Movimiento CERRADO contablemente. Solo Contabilidad puede reversarlo/reabrirlo.'
+      );
+      return;
+    }
+    // Antes se bloqueaba anular un movimiento identificado. Ahora se permite (con
+    // confirmación): al anularlo se libera/reversa. Si estaba ligado a una
+    // solicitud/documento, revisa ese caso aparte.
+    if (target && target.mainIdentification !== 'Sin identificar') {
+      if (
+        !window.confirm(
+          `Este movimiento está identificado como "${target.mainIdentification}". ¿Anularlo/reversarlo de todos modos? Se quitará de la cartola.`
+        )
+      ) {
+        return;
+      }
+    } else {
+      // Movimiento sin identificar: igual pedimos confirmación antes de borrar.
+      if (
+        !window.confirm('¿Borrar este movimiento de la cartola? Esta acción no se puede deshacer.')
+      ) {
+        return;
+      }
+    }
+
     if (selectedMovementId === movementId) {
       setSelectedMovementId(null);
     }
-    // Reversa explícita en el servidor (reemplaza la antigua reversión por omisión).
-    void fetch('/api/cartola/movements', {
-      method: 'DELETE',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ movementIds: [movementId] }),
-    }).catch(() => setUploadError('No fue posible reversar el movimiento en el servidor.'));
+    // D 3b: reversa explícita en el servidor y refresco de la página actual.
+    try {
+      const res = await fetch('/api/cartola/movements', {
+        method: 'DELETE',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ movementIds: [movementId] }),
+      });
+      if (!res.ok) {
+        setUploadError('No fue posible reversar el movimiento en el servidor.');
+        return;
+      }
+    } catch {
+      setUploadError('No fue posible reversar el movimiento en el servidor.');
+      return;
+    }
+    void loadPage();
   };
 
   const onOpenDocumentEditor = (movementId: string) => {
-    const target = movements.find((m) => m.movementId === movementId);
+    const target = serverRows.find((m) => m.movementId === movementId);
     if (!target) return;
     setEditingMovementId(movementId);
     setEditDocuments([...target.documents]);
     setEditType(target.mainIdentification);
+    setEditAdquirienteId(target.adquirienteId ?? '');
+    setEditSalesChannel((target.salesChannel as SalesChannel | null) ?? '');
     setEditDocumentRef('');
     setEditDocumentDetail('');
     setEditDocumentAmount('');
@@ -536,28 +897,59 @@ export function BankStatementManagement({
     setEditDocumentAmount('');
   };
 
-  const onSaveEditedDocuments = () => {
+  const onSaveEditedDocuments = async () => {
     setEditDocumentsError(null);
     if (!editingMovementId) return;
-    const target = movements.find((m) => m.movementId === editingMovementId);
+    const target = serverRows.find((m) => m.movementId === editingMovementId);
     if (!target) return;
 
     if (editType === 'Sin identificar') {
       // Lógica de reversión: Al volver a "Sin identificar", borramos los documentos
-      setMovements((prev) =>
-        prev.map((m) =>
-          m.movementId === editingMovementId
-            ? {
-                ...m,
-                documents: [],
-                mainIdentification: 'Sin identificar',
-                mainIdentificationId: mainIdentificationMap['Sin identificar'],
-              }
-            : m
-        )
-      );
+      const cleared: CartolaMovement = {
+        ...target,
+        documents: [],
+        mainIdentification: 'Sin identificar',
+        mainIdentificationId: mainIdentificationMap['Sin identificar'],
+        adquirienteId: null,
+        salesChannel: null,
+      };
+      const okClear = await persistMovements([cleared]);
+      if (!okClear) {
+        setEditDocumentsError('No fue posible guardar en el servidor.');
+        return;
+      }
       setIsDocumentModalOpen(false);
       setEditingMovementId(null);
+      void loadPage();
+      return;
+    }
+
+    // Adquiriente: se identifica por adquiriente + canal (sin documentos/PNR).
+    if (editType === 'Adquiriente') {
+      if (!editAdquirienteId) {
+        setEditDocumentsError('Selecciona el adquiriente.');
+        return;
+      }
+      if (!editSalesChannel) {
+        setEditDocumentsError('Selecciona el canal de venta.');
+        return;
+      }
+      const identified: CartolaMovement = {
+        ...target,
+        documents: [],
+        mainIdentification: 'Adquiriente',
+        mainIdentificationId: mainIdentificationMap['Adquiriente'],
+        adquirienteId: editAdquirienteId,
+        salesChannel: editSalesChannel,
+      };
+      const okAdq = await persistMovements([identified]);
+      if (!okAdq) {
+        setEditDocumentsError('No fue posible guardar en el servidor.');
+        return;
+      }
+      setIsDocumentModalOpen(false);
+      setEditingMovementId(null);
+      void loadPage();
       return;
     }
 
@@ -572,26 +964,29 @@ export function BankStatementManagement({
       return;
     }
 
-    setMovements((prev) =>
-      prev.map((m) =>
-        m.movementId === editingMovementId
-          ? {
-              ...m,
-              documents: editDocuments,
-              mainIdentification: editType,
-              mainIdentificationId: mainIdentificationMap[editType],
-            }
-          : m
-      )
-    );
+    const reconciled: CartolaMovement = {
+      ...target,
+      documents: editDocuments,
+      mainIdentification: editType,
+      mainIdentificationId: mainIdentificationMap[editType],
+      adquirienteId: null,
+      salesChannel: null,
+    };
+    const okRec = await persistMovements([reconciled]);
+    if (!okRec) {
+      setEditDocumentsError('No fue posible guardar en el servidor.');
+      return;
+    }
     setIsDocumentModalOpen(false);
     setEditingMovementId(null);
+    void loadPage();
   };
 
-  const onCreateManualMovement = () => {
+  const onCreateManualMovement = async () => {
+    if (savingManual) return; // evita doble envío mientras guarda
     setManualError(null);
-    const amount = Number(manualAmount);
-    if (!Number.isFinite(amount) || amount <= 0) {
+    const rawAmount = Number(manualAmount);
+    if (!Number.isFinite(rawAmount) || rawAmount <= 0) {
       setManualError('Monto inválido.');
       return;
     }
@@ -599,16 +994,22 @@ export function BankStatementManagement({
       setManualError('Descripción y fecha obligatorias.');
       return;
     }
-    const documentsTotal = manualDocuments.reduce((acc, d) => acc + d.amount, 0);
-    // Documentos opcionales: sin documentos el movimiento queda "por identificar".
-    // Si se agregan, deben cuadrar con el monto.
-    if (manualDocuments.length > 0 && documentsTotal !== amount) {
-      setManualError(`La suma (${documentsTotal}) debe ser igual al monto (${amount}).`);
-      return;
-    }
     const selectedAcc = availableAccounts.find((a) => a.id === manualAccountId);
     if (!selectedAcc) {
       setManualError('Debes seleccionar una cuenta bancaria destino.');
+      return;
+    }
+    // Redondeo según los decimales configurados en la cuenta destino (0 = CLP/Chile
+    // sin decimales, 2 = USD/centavos, etc.).
+    const decimals = selectedAcc.decimalPlaces ?? 0;
+    const factor = 10 ** decimals;
+    const amount = Math.round(rawAmount * factor) / factor;
+
+    const documentsTotal = manualDocuments.reduce((acc, d) => acc + d.amount, 0);
+    // Documentos opcionales: sin documentos el movimiento queda "por identificar".
+    // Si se agregan, deben cuadrar con el monto (con tolerancia por decimales).
+    if (manualDocuments.length > 0 && Math.abs(documentsTotal - amount) > 0.001) {
+      setManualError(`La suma (${documentsTotal}) debe ser igual al monto (${amount}).`);
       return;
     }
 
@@ -627,10 +1028,21 @@ export function BankStatementManagement({
       documents: manualDocuments,
     };
 
-    setMovements((prev) => [movement, ...prev]);
-    setIsMovementModalOpen(false);
-    setManualAmount('');
-    setManualDocuments([]);
+    setSavingManual(true);
+    try {
+      const ok = await persistMovements([movement]);
+      if (!ok) {
+        setManualError('No fue posible guardar el movimiento en el servidor.');
+        return;
+      }
+      setIsMovementModalOpen(false);
+      setManualAmount('');
+      setManualDocuments([]);
+      setCurrentPage(1);
+      void loadPage();
+    } finally {
+      setSavingManual(false);
+    }
   };
 
   return (
@@ -698,9 +1110,15 @@ export function BankStatementManagement({
                 currency: 'CLP',
               })}
             </p>
-            <Button className="mt-2" onClick={onConfirmMassUpload}>
-              Confirmar carga
+            <Button className="mt-2" onClick={onConfirmMassUpload} disabled={savingUpload}>
+              {savingUpload ? 'Guardando…' : 'Confirmar carga'}
             </Button>
+            {savingUpload && (
+              <p className="mt-2 flex items-center gap-2 text-xs text-slate-500">
+                <span className="h-3 w-3 animate-spin rounded-full border-2 border-slate-300 border-t-slate-600" />
+                Guardando la carga en base de datos, espere un momento…
+              </p>
+            )}
           </div>
         )}
       </div>
@@ -731,18 +1149,13 @@ export function BankStatementManagement({
           </div>
           <div className="flex flex-col gap-1">
             <label className="text-xs font-medium text-slate-500">Cuenta</label>
-            <select
-              className="h-9 rounded-md border bg-white px-2 text-sm"
+            <SearchableSelect
               value={accountFilter}
-              onChange={(e) => setAccountFilter(e.target.value)}
-            >
-              <option value="all">Todas las cuentas</option>
-              {uniqueAccounts.map((a) => (
-                <option key={a} value={a}>
-                  {a}
-                </option>
-              ))}
-            </select>
+              onChange={setAccountFilter}
+              allLabel="Todas las cuentas"
+              placeholder="Buscar cuenta…"
+              options={uniqueAccounts.map((a) => ({ value: a, label: a }))}
+            />
           </div>
           <div className="flex flex-col gap-1">
             <label className="text-xs font-medium text-slate-500">País</label>
@@ -774,13 +1187,41 @@ export function BankStatementManagement({
               ))}
             </select>
           </div>
+          <div className="flex flex-col gap-1">
+            <label className="text-xs font-medium text-slate-500">Fecha desde</label>
+            <input
+              type="date"
+              className="h-9 rounded-md border bg-white px-2 text-sm"
+              value={dateFromFilter}
+              onChange={(e) => setDateFromFilter(e.target.value)}
+            />
+          </div>
+          <div className="flex flex-col gap-1">
+            <label className="text-xs font-medium text-slate-500">Fecha hasta</label>
+            <input
+              type="date"
+              className="h-9 rounded-md border bg-white px-2 text-sm"
+              value={dateToFilter}
+              onChange={(e) => setDateToFilter(e.target.value)}
+            />
+          </div>
+          <div className="flex flex-col gap-1 sm:col-span-2">
+            <label className="text-xs font-medium text-slate-500">Buscar (ID / descripción / PNR)</label>
+            <input
+              type="text"
+              className="h-9 rounded-md border bg-white px-2 text-sm"
+              value={searchFilter}
+              onChange={(e) => setSearchFilter(e.target.value)}
+              placeholder="Ej. CL-BAN… / abono / ABC123"
+            />
+          </div>
         </div>
 
         <section
           className={`mb-3 rounded-md border p-3 text-sm ${unidentifiedRate > 20 ? 'border-red-200 bg-red-50 text-red-700' : unidentifiedRate > 10 ? 'border-amber-200 bg-amber-50 text-amber-700' : 'border-emerald-200 bg-emerald-50 text-emerald-700'}`}
         >
           Movimientos sin identificar: <span className="font-semibold">{unidentifiedCount}</span> de{' '}
-          <span className="font-semibold">{filteredMovements.length}</span> (
+          <span className="font-semibold">{serverTotal}</span> (
           <span className="font-semibold">{unidentifiedRate.toFixed(1)}%</span>).
         </section>
         <div className="max-h-[700px] overflow-auto rounded-lg border">
@@ -788,16 +1229,46 @@ export function BankStatementManagement({
             <thead className="sticky top-0 bg-slate-100">
               <tr>
                 <th className="px-3 py-2">ID Mov.</th>
-                <th className="px-3 py-2">Banco / Cuenta</th>
-                <th className="px-3 py-2">Monto</th>
-                <th className="px-3 py-2">Descripción</th>
-                <th className="px-3 py-2">Fecha</th>
-                <th className="px-3 py-2">Tipo</th>
+                <th
+                  className="cursor-pointer select-none px-3 py-2 hover:text-jetsmart-blue"
+                  onClick={() => toggleSort('bank')}
+                  title="Ordenar por banco"
+                >
+                  Banco / Cuenta{sortIcon('bank')}
+                </th>
+                <th
+                  className="cursor-pointer select-none px-3 py-2 hover:text-jetsmart-blue"
+                  onClick={() => toggleSort('amount')}
+                  title="Ordenar por monto"
+                >
+                  Monto{sortIcon('amount')}
+                </th>
+                <th
+                  className="cursor-pointer select-none px-3 py-2 hover:text-jetsmart-blue"
+                  onClick={() => toggleSort('descripcion')}
+                  title="Ordenar por descripción"
+                >
+                  Descripción{sortIcon('descripcion')}
+                </th>
+                <th
+                  className="cursor-pointer select-none px-3 py-2 hover:text-jetsmart-blue"
+                  onClick={() => toggleSort('date')}
+                  title="Ordenar por fecha"
+                >
+                  Fecha{sortIcon('date')}
+                </th>
+                <th
+                  className="cursor-pointer select-none px-3 py-2 hover:text-jetsmart-blue"
+                  onClick={() => toggleSort('tipo')}
+                  title="Ordenar por tipo"
+                >
+                  Tipo{sortIcon('tipo')}
+                </th>
                 <th className="px-3 py-2">Acciones</th>
               </tr>
             </thead>
             <tbody>
-              {loading ? (
+              {loading || serverLoading ? (
                 <tr>
                   <td colSpan={7} className="px-3 py-12 text-center text-slate-500">
                     <span className="inline-flex items-center gap-2">
@@ -825,9 +1296,7 @@ export function BankStatementManagement({
                       {m.bankAccount} ({m.country})
                     </div>
                   </td>
-                  <td className="px-3 py-3">
-                    {m.amount.toLocaleString('es-CL', { style: 'currency', currency: 'CLP' })}
-                  </td>
+                  <td className="px-3 py-3">{formatMovementAmount(m)}</td>
                   <td className="px-3 py-3">{m.description}</td>
                   <td className="px-3 py-3">{formatDate(m.date)}</td>
                   <td className="px-3 py-3">{m.mainIdentification}</td>
@@ -847,13 +1316,17 @@ export function BankStatementManagement({
                       >
                         Docs
                       </Button>
+                      {m.mainIdentification === 'Sin identificar' && (
+                        <Button variant="outline" size="sm" onClick={() => openEditMov(m)}>
+                          Editar
+                        </Button>
+                      )}
                       <Button
                         variant="destructive"
                         size="sm"
                         onClick={() => onDeleteMovement(m.movementId)}
-                        disabled={m.mainIdentification !== 'Sin identificar'}
                       >
-                        Borrar
+                        {m.mainIdentification === 'Sin identificar' ? 'Borrar' : 'Anular'}
                       </Button>
                     </div>
                   </td>
@@ -890,38 +1363,157 @@ export function BankStatementManagement({
         )}
       </div>
 
-      {/* Detalle Documentos */}
-      <div className="rounded-lg border bg-white p-4">
-        <h3 className="mb-3 text-lg font-semibold">Detalle de documentos</h3>
-        <div className="max-h-64 overflow-y-auto rounded-md border p-3">
-          {selectedMovement ? (
-            <div className="space-y-3">
-              <p className="text-sm font-semibold">Movimiento: {selectedMovement.movementId}</p>
-              <div className="flex gap-4 text-[10px] text-slate-500 uppercase">
-                <span>Banco: {selectedMovement.bank}</span>
-                <span>Cuenta: {selectedMovement.bankAccount}</span>
-              </div>
-              {selectedMovement.documents.length === 0 ? (
-                <p className="text-sm text-slate-600">Sin documentos asignados.</p>
-              ) : (
-                selectedMovement.documents.map((doc) => (
-                  <div key={doc.id} className="rounded-md border p-2 text-sm">
-                    <p className="font-medium">{doc.reference}</p>
-                    <p className="text-slate-600">{doc.detail}</p>
-                    <p>
-                      {doc.amount.toLocaleString('es-CL', { style: 'currency', currency: 'CLP' })}
-                    </p>
-                  </div>
-                ))
-              )}
+      {/* Detalle Documentos (modal aparte) */}
+      {selectedMovement && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
+          <Card className="w-full max-w-lg p-6">
+            <div className="mb-3 flex items-center justify-between">
+              <h3 className="text-lg font-semibold">Detalle del movimiento</h3>
+              <button
+                className="text-slate-400 hover:text-slate-600"
+                onClick={() => setSelectedMovementId(null)}
+                aria-label="Cerrar"
+              >
+                ✕
+              </button>
             </div>
-          ) : (
-            <p className="text-sm text-slate-600">Selecciona un movimiento.</p>
-          )}
+            <div className="space-y-3">
+              <p className="text-sm font-semibold">
+                {selectedMovement.displayId || selectedMovement.movementId}
+              </p>
+              <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-xs text-slate-600">
+                <span>
+                  <span className="text-slate-400">Banco:</span> {selectedMovement.bank}
+                </span>
+                <span>
+                  <span className="text-slate-400">Cuenta:</span> {selectedMovement.bankAccount} (
+                  {selectedMovement.country})
+                </span>
+                <span>
+                  <span className="text-slate-400">Monto:</span>{' '}
+                  {formatMovementAmount(selectedMovement)}
+                </span>
+                <span>
+                  <span className="text-slate-400">Fecha:</span> {formatDate(selectedMovement.date)}
+                </span>
+                <span>
+                  <span className="text-slate-400">Tipo:</span>{' '}
+                  {selectedMovement.mainIdentification}
+                </span>
+                {selectedMovement.adquirienteId && (
+                  <span>
+                    <span className="text-slate-400">Adquiriente:</span>{' '}
+                    {adquirienteNameById(selectedMovement.adquirienteId)}
+                  </span>
+                )}
+                {selectedMovement.salesChannel && (
+                  <span>
+                    <span className="text-slate-400">Canal:</span>{' '}
+                    {salesChannelLabel(selectedMovement.salesChannel)}
+                  </span>
+                )}
+              </div>
+              {selectedMovement.description && (
+                <p className="text-sm text-slate-700">
+                  <span className="text-slate-400">Descripción:</span> {selectedMovement.description}
+                </p>
+              )}
+              {selectedMovement.extraFields?.some((v) => v && v.trim()) && (
+                <div className="rounded-md border bg-slate-50 p-2 text-xs text-slate-600">
+                  <p className="mb-1 font-medium text-slate-500">Adicionales</p>
+                  <div className="grid grid-cols-1 gap-0.5">
+                    {selectedMovement.extraFields.map((v, i) =>
+                      v && v.trim() ? (
+                        <span key={i}>
+                          <span className="text-slate-400">Adicional {i + 1}:</span> {v}
+                        </span>
+                      ) : null
+                    )}
+                  </div>
+                </div>
+              )}
+              <div>
+                <p className="mb-1 text-xs font-medium text-slate-500">Documentos</p>
+                <div className="max-h-64 space-y-2 overflow-y-auto rounded-md border p-3">
+                  {selectedMovement.documents.length === 0 ? (
+                    <p className="text-sm text-slate-600">Sin documentos asignados.</p>
+                  ) : (
+                    selectedMovement.documents.map((doc) => (
+                      <div key={doc.id} className="rounded-md border p-2 text-sm">
+                        <p className="font-medium">{doc.reference}</p>
+                        <p className="text-slate-600">{doc.detail}</p>
+                        <p>
+                          {formatAmountFor(
+                            doc.amount,
+                            selectedMovement.bank,
+                            selectedMovement.bankAccount
+                          )}
+                        </p>
+                      </div>
+                    ))
+                  )}
+                </div>
+              </div>
+            </div>
+            <div className="mt-4 flex justify-end">
+              <Button variant="outline" onClick={() => setSelectedMovementId(null)}>
+                Cerrar
+              </Button>
+            </div>
+          </Card>
         </div>
-      </div>
+      )}
 
       {/* Modals integrados en el componente */}
+      {editMov && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
+          <Card className="w-full max-w-md p-6">
+            <h3 className="mb-1 text-lg font-semibold">
+              Editar movimiento {editMov.displayId || editMov.movementId}
+            </h3>
+            <p className="mb-4 text-xs text-slate-500">
+              Solo movimientos sin identificar. Ajusta monto, fecha y descripción.
+            </p>
+            <div className="space-y-3">
+              <div className="space-y-1">
+                <label className="text-xs font-medium">Monto</label>
+                <Input
+                  type="number"
+                  value={editMovAmount}
+                  onChange={(e) => setEditMovAmount(e.target.value)}
+                />
+              </div>
+              <div className="space-y-1">
+                <label className="text-xs font-medium">Fecha</label>
+                <Input
+                  type="date"
+                  value={editMovDate}
+                  onChange={(e) => setEditMovDate(e.target.value)}
+                />
+              </div>
+              <div className="space-y-1">
+                <label className="text-xs font-medium">Descripción</label>
+                <Input value={editMovDesc} onChange={(e) => setEditMovDesc(e.target.value)} />
+              </div>
+              {editMovError && <p className="text-xs text-red-600">{editMovError}</p>}
+              {savingEdit && (
+                <p className="flex items-center gap-2 text-xs text-slate-500">
+                  <span className="h-3 w-3 animate-spin rounded-full border-2 border-slate-300 border-t-slate-600" />
+                  Guardando en base de datos, espere un momento…
+                </p>
+              )}
+            </div>
+            <div className="mt-4 flex justify-end gap-2">
+              <Button variant="outline" onClick={() => setEditMov(null)} disabled={savingEdit}>
+                Cancelar
+              </Button>
+              <Button onClick={onSaveMovEdit} disabled={savingEdit}>
+                {savingEdit ? 'Guardando…' : 'Guardar'}
+              </Button>
+            </div>
+          </Card>
+        </div>
+      )}
       {isMovementModalOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
           <Card className="max-h-[90vh] w-full max-w-2xl overflow-y-auto p-6">
@@ -929,18 +1521,15 @@ export function BankStatementManagement({
             <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
               <div className="md:col-span-2 space-y-1">
                 <label className="text-xs font-medium">Cuenta Bancaria Destino</label>
-                <select
-                  className="w-full h-10 rounded-md border bg-white px-3 text-sm"
+                <SearchableSelect
                   value={manualAccountId}
-                  onChange={(e) => setManualAccountId(e.target.value)}
-                >
-                  <option value="">Selecciona una cuenta...</option>
-                  {availableAccounts.map((acc) => (
-                    <option key={acc.id} value={acc.id}>
-                      {acc.bankName} - {acc.accountNumber} ({acc.country})
-                    </option>
-                  ))}
-                </select>
+                  onChange={setManualAccountId}
+                  placeholder="Selecciona una cuenta..."
+                  options={availableAccounts.map((acc) => ({
+                    value: acc.id,
+                    label: `${acc.bankName} - ${acc.accountNumber} (${acc.country})`,
+                  }))}
+                />
               </div>
               <Input
                 type="number"
@@ -1028,11 +1617,23 @@ export function BankStatementManagement({
               </div>
             </div>
             {manualError && <p className="mt-2 text-xs text-red-600">{manualError}</p>}
+            {savingManual && (
+              <p className="mt-2 flex items-center gap-2 text-xs text-slate-500">
+                <span className="h-3 w-3 animate-spin rounded-full border-2 border-slate-300 border-t-slate-600" />
+                Guardando en base de datos, espere un momento…
+              </p>
+            )}
             <div className="mt-4 flex justify-end gap-2">
-              <Button variant="outline" onClick={() => setIsMovementModalOpen(false)}>
+              <Button
+                variant="outline"
+                onClick={() => setIsMovementModalOpen(false)}
+                disabled={savingManual}
+              >
                 Cancelar
               </Button>
-              <Button onClick={onCreateManualMovement}>Guardar</Button>
+              <Button onClick={onCreateManualMovement} disabled={savingManual}>
+                {savingManual ? 'Guardando…' : 'Guardar'}
+              </Button>
             </div>
           </Card>
         </div>
@@ -1061,54 +1662,100 @@ export function BankStatementManagement({
               </p>
             </div>
 
-            <div className="flex gap-2 mb-4">
-              {editType === 'Abono débito' ? (
-                <select
-                  className="h-10 flex-1 rounded-md border bg-white px-2 text-sm"
-                  value={editDocumentRef}
-                  onChange={(e) => setEditDocumentRef(e.target.value)}
-                >
-                  <option value="">Selecciona cliente…</option>
-                  {clients.map((c) => {
-                    const code = c.navitaireCode || c.appCode || '';
-                    return (
-                      <option key={c.id} value={code}>
-                        {code} — {c.name}
-                      </option>
-                    );
-                  })}
-                </select>
-              ) : (
-                <Input
-                  placeholder="Ref"
-                  value={editDocumentRef}
-                  onChange={(e) => setEditDocumentRef(e.target.value)}
-                />
-              )}
-              <Input
-                type="number"
-                placeholder="Monto"
-                value={editDocumentAmount}
-                onChange={(e) => setEditDocumentAmount(e.target.value)}
-              />
-              <Button onClick={onAddEditDocument}>Add</Button>
-            </div>
-            <div className="max-h-52 overflow-y-auto rounded-md border p-2">
-              {editDocuments.map((d) => (
-                <div key={d.id} className="flex justify-between items-center text-sm border-b py-2">
-                  <span>
-                    {d.reference} (${d.amount})
-                  </span>
-                  <Button
-                    variant="destructive"
-                    size="sm"
-                    onClick={() => setEditDocuments(editDocuments.filter((x) => x.id !== d.id))}
+            {editType === 'Adquiriente' ? (
+              // Adquiriente se identifica por adquiriente + canal (no por documentos).
+              <div className="mb-4 space-y-3">
+                <div className="space-y-1">
+                  <label className="text-sm font-medium">Adquiriente</label>
+                  <select
+                    className="h-10 w-full rounded-md border bg-white px-2 text-sm"
+                    value={editAdquirienteId}
+                    onChange={(e) => setEditAdquirienteId(e.target.value)}
                   >
-                    X
-                  </Button>
+                    <option value="">Selecciona adquiriente…</option>
+                    {activeAdquirientes.map((a) => (
+                      <option key={a.id} value={a.id}>
+                        {(a.appCode ? `${a.appCode} — ` : '') + a.name}
+                      </option>
+                    ))}
+                  </select>
                 </div>
-              ))}
-            </div>
+                <div className="space-y-1">
+                  <label className="text-sm font-medium">Canal de venta</label>
+                  <select
+                    className="h-10 w-full rounded-md border bg-white px-2 text-sm"
+                    value={editSalesChannel}
+                    onChange={(e) => setEditSalesChannel(e.target.value as SalesChannel | '')}
+                  >
+                    <option value="">Selecciona canal…</option>
+                    {SALES_CHANNELS.map((c) => (
+                      <option key={c.value} value={c.value}>
+                        {c.label}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                {activeAdquirientes.length === 0 && (
+                  <p className="text-[11px] text-amber-600">
+                    No hay adquirientes registrados. Créalos en la pestaña Adquirientes.
+                  </p>
+                )}
+              </div>
+            ) : (
+              <>
+                <div className="flex gap-2 mb-4">
+                  {editType === 'Abono débito' ? (
+                    <select
+                      className="h-10 flex-1 rounded-md border bg-white px-2 text-sm"
+                      value={editDocumentRef}
+                      onChange={(e) => setEditDocumentRef(e.target.value)}
+                    >
+                      <option value="">Selecciona cliente…</option>
+                      {clients.map((c) => {
+                        const code = c.navitaireCode || c.appCode || '';
+                        return (
+                          <option key={c.id} value={code}>
+                            {code} — {c.name}
+                          </option>
+                        );
+                      })}
+                    </select>
+                  ) : (
+                    <Input
+                      placeholder="Ref"
+                      value={editDocumentRef}
+                      onChange={(e) => setEditDocumentRef(e.target.value)}
+                    />
+                  )}
+                  <Input
+                    type="number"
+                    placeholder="Monto"
+                    value={editDocumentAmount}
+                    onChange={(e) => setEditDocumentAmount(e.target.value)}
+                  />
+                  <Button onClick={onAddEditDocument}>Add</Button>
+                </div>
+                <div className="max-h-52 overflow-y-auto rounded-md border p-2">
+                  {editDocuments.map((d) => (
+                    <div
+                      key={d.id}
+                      className="flex justify-between items-center text-sm border-b py-2"
+                    >
+                      <span>
+                        {d.reference} (${d.amount})
+                      </span>
+                      <Button
+                        variant="destructive"
+                        size="sm"
+                        onClick={() => setEditDocuments(editDocuments.filter((x) => x.id !== d.id))}
+                      >
+                        X
+                      </Button>
+                    </div>
+                  ))}
+                </div>
+              </>
+            )}
             {editDocumentsError && (
               <p className="mt-2 text-xs text-red-600">{editDocumentsError}</p>
             )}

@@ -6,6 +6,7 @@ import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
+import { TableLoadingRow } from '@/components/ui/loading-row';
 import { formatDate } from '@/lib/format';
 
 type ClosureRow = {
@@ -98,6 +99,8 @@ export function ContabilidadManagement() {
   const [label, setLabel] = useState('');
 
   const [loading, setLoading] = useState(false);
+  // Carga inicial de datos del módulo (cierres/backlog/categorías) para el indicador.
+  const [initialLoading, setInitialLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
   const [categories, setCategories] = useState<CategoryAccount[]>([]);
@@ -123,9 +126,10 @@ export function ContabilidadManagement() {
   }, []);
 
   useEffect(() => {
-    loadClosures();
-    loadBacklog();
-    loadCategories();
+    setInitialLoading(true);
+    Promise.all([loadClosures(), loadBacklog(), loadCategories()]).finally(() =>
+      setInitialLoading(false)
+    );
   }, [loadClosures, loadBacklog, loadCategories]);
 
   const onGenerate = async () => {
@@ -274,7 +278,9 @@ export function ContabilidadManagement() {
               </tr>
             </thead>
             <tbody>
-              {closures.length === 0 ? (
+              {initialLoading ? (
+                <TableLoadingRow colSpan={7} label="Cargando cierres…" />
+              ) : closures.length === 0 ? (
                 <tr>
                   <td colSpan={7} className="py-4 text-center text-slate-400">
                     Aún no hay cierres.
