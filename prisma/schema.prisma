@@ -26,6 +26,8 @@ model User {
 
   createdBankAccounts        BankAccount[]               @relation("BankAccountCreatedBy")
   createdClients             Client[]                    @relation("ClientCreatedBy")
+  createdAdquirientes        Adquiriente[]               @relation("AdquirienteCreatedBy")
+  financeApprovedRequests    CollectionRequest[]         @relation("CollectionRequestFinanceApprovedBy")
   uploadedBankImports        BankStatementImport[]       @relation("BankImportUploadedBy")
   ownedCartolaMovements      CartolaMovement[]           @relation("CartolaMovementOwner")
   createdCollectionRequests  CollectionRequest[]         @relation("CollectionRequestCreatedBy")
@@ -79,6 +81,10 @@ model BankAccount {
   accountNumber String
   country       String
   currency      String   @default("CLP")
+  // Decimales que usa la cuenta al registrar montos (0 = Chile/CLP sin decimales,
+  // 2 = USD/centavos, etc.). Parametrizable por cuenta. Controla el redondeo al
+  // guardar movimientos y el formato al mostrarlos.
+  decimalPlaces Int      @default(0)
   taxId         String?
   legalName     String?
   isActive      Boolean  @default(true)
@@ -104,6 +110,12 @@ model Client {
   sapBP         String?  @unique
   country       String   @default("Chile") // país del cliente; define el país de sus documentos
   isActive      Boolean  @default(true)
+  // #9 Validación de clientes: el Agente CC crea clientes que quedan "Pendiente";
+  // Recaudación/Cobranza los validan (y de paso completan Navitaire/BP SAP si aplica).
+  // Default "Validado": los clientes preexistentes y los creados por roles validadores
+  // entran ya validados; solo los creados por Agente CC entran como Pendiente.
+  validationStatus ClientValidationStatus @default(Validado)
+  validatedAt      DateTime? // cuándo un validador aprobó el cliente
   createdAt     DateTime @default(now())
   updatedAt     DateTime @updatedAt
   createdById   String?
@@ -112,6 +124,31 @@ model Client {
   saleReferences     SaleReference[]
   collectionRequests CollectionRequest[]
   cobranzaDocuments  CobranzaDocument[]
+
+  @@index([name])
+  @@index([validationStatus])
+}
+
+/// Adquiriente (medios de pago). Similar a Cliente pero SIN código Navitaire.
+/// BP SAP es opcional (se incorpora luego). Se usa al identificar abonos en Cartola.
+model Adquiriente {
+  id          String   @id @default(cuid())
+  appCode     String   @unique // ADQ-000001
+  name        String
+  taxId       String   @unique // RUT/Tax ID (obligatorio)
+  sapBP       String?  @unique // BP SAP (opcional; se puede incorporar después)
+  country     String   @default("Chile")
+  // Palabras clave parametrizables para auto-identificar movimientos de Cartola:
+  // si alguna aparece en la descripción o adicionales de un movimiento "Sin
+  // identificar", se identifica como este adquiriente. Separadas por coma/línea.
+  matchKeywords String? @db.Text
+  isActive    Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  createdById String?
+  createdBy   User?    @relation("AdquirienteCreatedBy", fields: [createdById], references: [id], onDelete: SetNull)
+
+  movements CartolaMovement[]
 
   @@index([name])
 }
@@ -168,6 +205,11 @@ model CartolaMovement {
   description        String                 @db.Text
   extraFields        Json?
   identificationType MainIdentificationType @default(SinIdentificar)
+  // Identificación como Adquiriente (rol Conciliación medios de pago): adquiriente
+  // + canal de venta. Solo se llenan cuando identificationType = Adquiriente.
+  adquirienteId      String?
+  adquiriente        Adquiriente?           @relation(fields: [adquirienteId], references: [id], onDelete: SetNull)
+  salesChannel       SalesChannel?
   status             MovementStatus         @default(Unidentified)
   // Fase A — ciclo de vida de cierre contable (consumido por el futuro modulo Contabilidad).
   closeState         MovementCloseState     @default(Abierto)
@@ -191,6 +233,7 @@ model CartolaMovement {
   @@index([bankAccountNumber])
   @@index([status])
   @@index([identificationType])
+  @@index([adquirienteId])
   @@index([closeState])
   @@index([originYear, originMonth])
   @@index([finalizedInClosureId])
@@ -237,10 +280,17 @@ model CollectionRequest {
   supportFile          SupportFile?     @relation("PrimarySupport", fields: [supportFileId], references: [id], onDelete: SetNull)
   attachments          SupportFile[]    @relation("RequestAttachments")
   status               CollectionStatus @default(Pendiente)
+  // Track de FINANZAS (Recaudación), independiente del track CC (status). Un caso
+  // puede estar "Gestionado CC" (agente) y "Aprobado por Finanzas" a la vez.
+  financeApproved      Boolean          @default(false)
+  financeApprovedAt    DateTime?
+  financeApprovedById  String?
+  financeApprovedBy    User?            @relation("CollectionRequestFinanceApprovedBy", fields: [financeApprovedById], references: [id], onDelete: SetNull)
   associatedMovementId String?
   associatedMovement   CartolaMovement? @relation(fields: [associatedMovementId], references: [id], onDelete: SetNull)
   rejectionComment     String?
   authorizationCode    String? // codigo de autorizacion (alfanumerico) del comprobante bancario
+  quotationId          String? // #11 ID de cotizacion asociado a la solicitud (opcional)
   infoRequestComment   String? // comentario de Recaudacion al solicitar SWIFT/MT103
   infoRequestedAt      DateTime? // cuando Recaudacion solicito informacion adicional
   // Marcas de tiempo por etapa (para el informe de tiempos del Agente CC).
@@ -263,6 +313,7 @@ model CollectionRequest {
   @@index([status])
   @@index([associatedMovementId])
   @@index([authorizationCode])
+  @@index([quotationId])
 }
 
 model CollectionRequestItem {
@@ -430,6 +481,14 @@ enum MainIdentificationType {
   AbonoDebito     @map("Abono débito")
 }
 
+/// Canales de venta para abonos identificados como Adquiriente. Fijos por ahora.
+/// Etiquetas legibles (GDS / Venta aeropuerto / Venta web) se resuelven en la UI.
+enum SalesChannel {
+  GDS
+  VentaAeropuerto
+  VentaWeb
+}
+
 enum MovementStatus {
   Unidentified
   PartiallyAllocated
@@ -451,6 +510,11 @@ enum TraceModule {
   Clientes
   Usuarios
   Sistema
+}
+
+enum ClientValidationStatus {
+  Pendiente
+  Validado
 }
 
 enum CollectionStatus {

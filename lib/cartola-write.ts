@@ -30,7 +30,7 @@ export type MovementInput = {
   description: string;
   date: string;
   extraFields: [string, string, string, string, string];
-  mainIdentification: 'Sin identificar' | 'Adquiriente' | 'GC' | 'Cobranza crédito';
+  mainIdentification: 'Sin identificar' | 'Adquiriente' | 'GC' | 'Cobranza crédito' | 'Abono débito';
   mainIdentificationId?: string;
   documents: MovementDocumentInput[];
 };
