@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server';
 import { getServerSession } from 'next-auth';
 
-import { authOptions } from '@/lib/auth';
+import { authOptions, getAppSession } from '@/lib/auth';
 import { canRead } from '@/lib/authz';
 import { cartolaToUi } from '@/lib/business-mappers';
 import { buildMovementWhere } from '@/lib/cartola-filters';
@@ -13,7 +13,7 @@ import prisma from '@/lib/prisma';
  * paginated listing. The client builds the spreadsheet from this payload.
  */
 export async function GET(request: Request) {
-  const session = await getServerSession(authOptions);
+  const session = await getAppSession();
   if (!session?.user?.email) {
     return NextResponse.json({ error: 'No autenticado' }, { status: 401 });
   }

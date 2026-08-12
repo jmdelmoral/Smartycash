@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server';
 import { getServerSession } from 'next-auth';
 
-import { authOptions } from '@/lib/auth';
+import { authOptions, getAppSession } from '@/lib/auth';
 import { canRead } from '@/lib/authz';
 import { buildMovementWhere } from '@/lib/cartola-filters';
 import { cartolaToUi } from '@/lib/business-mappers';
@@ -22,7 +22,7 @@ import prisma from '@/lib/prisma';
  *   limit     (opcional)    tope de resultados (default 50, max 100)
  */
 export async function GET(request: Request) {
-  const session = await getServerSession(authOptions);
+  const session = await getAppSession();
   if (!session?.user?.email) {
     return NextResponse.json({ error: 'No autenticado' }, { status: 401 });
   }

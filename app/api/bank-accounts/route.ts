@@ -4,7 +4,7 @@ import type { Session } from 'next-auth';
 import { z } from 'zod';
 
 import { auditAction } from '@/lib/audit';
-import { authOptions } from '@/lib/auth';
+import { authOptions, getAppSession } from '@/lib/auth';
 import prisma from '@/lib/prisma';
 
 const bankAccountSchema = z.object({
@@ -12,6 +12,7 @@ const bankAccountSchema = z.object({
   accountNumber: z.string().trim().min(1),
   country: z.string().trim().min(1),
   currency: z.string().trim().min(3).max(3).default('CLP'),
+  decimalPlaces: z.coerce.number().int().min(0).max(4).default(0),
   taxId: z.string().trim().optional(),
   legalName: z.string().trim().optional(),
 });
@@ -65,7 +66,7 @@ async function nextBankAccountDisplayId(country: string) {
 }
 
 export async function GET() {
-  const session = await getServerSession(authOptions);
+  const session = await getAppSession();
   if (!session?.user?.email) {
     return NextResponse.json({ error: 'No autenticado' }, { status: 401 });
   }
@@ -78,7 +79,7 @@ export async function GET() {
 }
 
 export async function POST(request: Request) {
-  const session = await getServerSession(authOptions);
+  const session = await getAppSession();
   if (!isAdmin(session)) {
     return NextResponse.json({ error: 'Sin permisos' }, { status: 403 });
   }
@@ -98,6 +99,7 @@ export async function POST(request: Request) {
           accountNumber: parsed.data.accountNumber.trim(),
           country: parsed.data.country.trim(),
           currency: parsed.data.currency.toUpperCase(),
+          decimalPlaces: parsed.data.decimalPlaces,
           taxId: normalizeOptional(parsed.data.taxId),
           legalName: normalizeOptional(parsed.data.legalName),
           createdById: session?.user?.id,
@@ -122,13 +124,16 @@ export async function POST(request: Request) {
 
     return NextResponse.json({ account }, { status: 201 });
   } catch (error) {
-    const message = error instanceof Error ? error.message : 'No se pudo crear la cuenta';
+    const raw = error instanceof Error ? error.message : '';
+    const message = raw.includes('Unique constraint')
+      ? 'Ya existe una cuenta con ese banco, número de cuenta y país (revisa también las cuentas desactivadas).'
+      : raw || 'No se pudo crear la cuenta';
     return NextResponse.json({ error: message }, { status: 400 });
   }
 }
 
 export async function PATCH(request: Request) {
-  const session = await getServerSession(authOptions);
+  const session = await getAppSession();
   if (!isAdmin(session)) {
     return NextResponse.json({ error: 'Sin permisos' }, { status: 403 });
   }
@@ -162,6 +167,9 @@ export async function PATCH(request: Request) {
         ...(parsed.data.country !== undefined ? { country: parsed.data.country } : {}),
         ...(parsed.data.currency !== undefined
           ? { currency: parsed.data.currency.toUpperCase() }
+          : {}),
+        ...(parsed.data.decimalPlaces !== undefined
+          ? { decimalPlaces: parsed.data.decimalPlaces }
           : {}),
         ...(parsed.data.taxId !== undefined ? { taxId: normalizeOptional(parsed.data.taxId) } : {}),
         ...(parsed.data.legalName !== undefined
