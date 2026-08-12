@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server';
 import { getServerSession } from 'next-auth';
 
-import { authOptions } from '@/lib/auth';
+import { authOptions, getAppSession } from '@/lib/auth';
 import { canWrite } from '@/lib/authz';
 import { ALLOWED_MIME_TYPES, MAX_FILE_BYTES, fileStorage } from '@/lib/file-storage';
 import prisma from '@/lib/prisma';
@@ -12,7 +12,7 @@ import prisma from '@/lib/prisma';
  * ids para que el frontend los asocie a la solicitud en el guardado.
  */
 export async function POST(request: Request) {
-  const session = await getServerSession(authOptions);
+  const session = await getAppSession();
   if (!session?.user?.email) {
     return NextResponse.json({ error: 'No autenticado' }, { status: 401 });
   }
