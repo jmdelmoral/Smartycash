@@ -2,7 +2,7 @@ import { NextResponse } from 'next/server';
 import { getServerSession } from 'next-auth';
 import { z } from 'zod';
 
-import { authOptions } from '@/lib/auth';
+import { authOptions, getAppSession } from '@/lib/auth';
 import { createUser, listUsers, updateUserStatus, type UserRole } from '@/lib/user-store';
 
 const createUserSchema = z.object({
@@ -19,7 +19,7 @@ const createUserSchema = z.object({
 });
 
 export async function GET() {
-  const session = await getServerSession(authOptions);
+  const session = await getAppSession();
   const role = session?.user?.role ?? session?.roles?.[0];
   if (!session?.user?.email) {
     return NextResponse.json({ error: 'No autenticado' }, { status: 401 });
@@ -32,7 +32,7 @@ export async function GET() {
 }
 
 export async function POST(request: Request) {
-  const session = await getServerSession(authOptions);
+  const session = await getAppSession();
   const role = session?.user?.role ?? session?.roles?.[0];
   if (role !== 'Administrador') {
     return NextResponse.json({ error: 'Sin permisos' }, { status: 403 });
@@ -54,7 +54,7 @@ export async function POST(request: Request) {
 }
 
 export async function PATCH(request: Request) {
-  const session = await getServerSession(authOptions);
+  const session = await getAppSession();
   const role = session?.user?.role ?? session?.roles?.[0];
   if (role !== 'Administrador') {
     return NextResponse.json({ error: 'Sin permisos' }, { status: 403 });

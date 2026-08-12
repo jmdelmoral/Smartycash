@@ -3,7 +3,7 @@ import { getServerSession } from 'next-auth';
 import { z } from 'zod';
 
 import { auditAction } from '@/lib/audit';
-import { authOptions } from '@/lib/auth';
+import { authOptions, getAppSession } from '@/lib/auth';
 import { canRead, canWrite } from '@/lib/authz';
 import prisma from '@/lib/prisma';
 
@@ -15,7 +15,7 @@ const bodySchema = z.object({
 
 /** Lista de cierres (más recientes primero) con su snapshot. */
 export async function GET() {
-  const session = await getServerSession(authOptions);
+  const session = await getAppSession();
   if (!session?.user?.email) {
     return NextResponse.json({ error: 'No autenticado' }, { status: 401 });
   }
@@ -28,7 +28,7 @@ export async function GET() {
 
 /** Genera un cierre sobre un rango de fechas. */
 export async function POST(request: Request) {
-  const session = await getServerSession(authOptions);
+  const session = await getAppSession();
   if (!session?.user?.email) {
     return NextResponse.json({ error: 'No autenticado' }, { status: 401 });
   }

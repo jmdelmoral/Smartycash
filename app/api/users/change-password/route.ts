@@ -2,7 +2,7 @@ import { NextResponse } from 'next/server';
 import { getServerSession } from 'next-auth';
 import { z } from 'zod';
 
-import { authOptions } from '@/lib/auth';
+import { authOptions, getAppSession } from '@/lib/auth';
 import { changeUserPassword } from '@/lib/user-store';
 
 const schema = z.object({
@@ -10,7 +10,7 @@ const schema = z.object({
 });
 
 export async function POST(request: Request) {
-  const session = await getServerSession(authOptions);
+  const session = await getAppSession();
   const email = session?.user?.email;
   if (!email) {
     return NextResponse.json({ error: 'No autenticado' }, { status: 401 });

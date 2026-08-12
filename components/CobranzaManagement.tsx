@@ -17,6 +17,7 @@ import {
   DialogFooter,
 } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
+import { TableLoadingRow } from '@/components/ui/loading-row';
 import {
   BankAccount,
   CartolaMovement,
@@ -35,6 +36,8 @@ interface CobranzaManagementProps {
   setMovements: React.Dispatch<React.SetStateAction<CartolaMovement[]>>;
   cobranzaDocs: CobranzaMainDocument[];
   setCobranzaDocs: React.Dispatch<React.SetStateAction<CobranzaMainDocument[]>>;
+  /** Carga inicial de datos maestros en curso (para mostrar indicador). */
+  loading?: boolean;
 }
 
 export function CobranzaManagement({
@@ -44,6 +47,7 @@ export function CobranzaManagement({
   setMovements,
   cobranzaDocs,
   setCobranzaDocs,
+  loading = false,
 }: CobranzaManagementProps) {
   const [clientFilter, setClientFilter] = useState('all');
   const [statusFilter, setStatusFilter] = useState('all');
@@ -1277,7 +1281,9 @@ export function CobranzaManagement({
               </tr>
             </thead>
             <tbody>
-              {processedDocs.length === 0 ? (
+              {loading ? (
+                <TableLoadingRow colSpan={7} label="Cargando documentos…" />
+              ) : processedDocs.length === 0 ? (
                 <tr>
                   <td colSpan={7} className="p-8 text-center text-slate-400 italic">
                     No se encontraron documentos

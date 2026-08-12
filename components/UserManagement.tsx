@@ -6,6 +6,7 @@ import { z } from 'zod';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
+import { TableLoadingRow } from '@/components/ui/loading-row';
 import { USER_ROLE_LABELS, UserRecord, UserRole } from '@/types';
 
 const roleOptions: Array<{ value: UserRole; label: string }> = [
@@ -213,11 +214,7 @@ export function UserManagement() {
           </thead>
           <tbody>
             {isLoading ? (
-              <tr>
-                <td className="px-4 py-3" colSpan={6}>
-                  Cargando usuarios...
-                </td>
-              </tr>
+              <TableLoadingRow colSpan={6} label="Cargando usuarios…" />
             ) : users.length === 0 ? (
               <tr>
                 <td className="px-4 py-3" colSpan={6}>
@@ -242,7 +239,18 @@ export function UserManagement() {
                         variant="outline"
                         size="sm"
                         className="h-7 px-2 text-xs whitespace-nowrap"
-                        onClick={() => onToggleUser(user.id)}
+                        onClick={() => {
+                          // Confirmación solo al desactivar (activar es inocuo).
+                          if (
+                            user.isActive &&
+                            !window.confirm(
+                              `¿Desactivar al usuario ${user.name}? No podrá iniciar sesión hasta reactivarlo.`
+                            )
+                          ) {
+                            return;
+                          }
+                          onToggleUser(user.id);
+                        }}
                       >
                         {user.isActive ? 'Desactivar' : 'Activar'}
                       </Button>
